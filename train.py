@@ -23,7 +23,7 @@ from dataloader_voc import VOC
 from dataloader import Dataset_uni, ValPre
 from network import Network
 from utils.init_func import init_weight, group_weight
-from utils.contrastive_loss import compute_contra_memobank_loss
+from utils.contrastive_loss import compute_contra_memobank_loss, get_consit_criterion
 from engine.lr_policy import WarmUpPolyLR
 from utils.pyt_utils import parse_devices
 from engine.engine import Engine
@@ -141,6 +141,7 @@ with Engine(custom_parser=parser) as engine:
         queue_ptrlis.append(torch.zeros(1, dtype=torch.long))
     queue_size[0] = 50000
 
+
     # # build prototype
     # prototype = torch.zeros(
     #     (
@@ -166,6 +167,19 @@ with Engine(custom_parser=parser) as engine:
     unsupervised_train_sampler_0, unsupervised_train_loader_1, \
     unsupervised_train_sampler_1 = prepare_data(engine, dataset, config, collate_fn)
 
+    if config.consistency:
+        class_criterion = torch.rand(3, config.num_classes).type(torch.float32)
+        cutmix_bank = torch.zeros(config.num_classes, unsupervised_train_loader_0.dataset.__len__()).cuda()
+        class_momentum = 0.999
+        all_cat = [i for i in range(config.num_classes)]
+        ignore_cat = [0]
+        target_cat = list(set(all_cat)-set(ignore_cat))
+        num_cat = config.number_cat
+        area_thresh = config.area_thresh
+        no_pad = True
+        no_slim = True
+        area_thresh2 = config.area_thresh2
+
     if engine.distributed and (engine.local_rank == 0):
         tb_dir = config.tb_dir + '/{}'.format(time.strftime("%b%d_%d-%H-%M", time.localtime()))
         generate_tb_dir = config.tb_dir + '/tb'
@@ -174,7 +188,11 @@ with Engine(custom_parser=parser) as engine:
 
     # config network and criterion
     criterion = nn.CrossEntropyLoss(reduction='mean', ignore_index=255)
-    criterion_csst = nn.CrossEntropyLoss(reduction='mean', ignore_index=255)
+    if config.consistency:
+        sample = config.samples
+        criterion_csst = get_consit_criterion(config, cons=True)
+    else:
+        criterion_csst = torch.nn.CrossEntropyLoss(ignore_index=255)
 
     if engine.distributed:
         BatchNorm2d = SyncBatchNorm
@@ -258,6 +276,20 @@ with Engine(custom_parser=parser) as engine:
         unsupervised_dataloader_0 = iter(unsupervised_train_loader_0)
         unsupervised_dataloader_1 = iter(unsupervised_train_loader_1)
 
+        if config.consistency:
+            conf = 1 - class_criterion[0]
+            conf = conf[target_cat]
+            conf = (conf**0.5).numpy()
+            conf_print = np.exp(conf)/np.sum(np.exp(conf))
+            if engine.local_rank == 0:
+                print('epoch [',epoch,': ]', 'sample_rate_target_class_conf', conf_print)
+                print('epoch [',epoch,': ]', 'criterion_per_class' ,class_criterion[0])
+                print('epoch [',epoch,': ]', 'sample_rate_per_class_conf' ,(1-class_criterion[0])/(torch.max(1-class_criterion[0])+1e-12))
+            query_cat = []
+            for rc_idx in range(num_cat):
+                query_cat.append(np.random.choice(target_cat, p=conf))
+            query_cat = list(set(query_cat))
+
         ''' supervised part '''
         start_time = time.time()
         for idx in pbar:
@@ -268,8 +300,8 @@ with Engine(custom_parser=parser) as engine:
             minibatch = dataloader.next()
             unsup_minibatch_0 = unsupervised_dataloader_0.next()
             unsup_minibatch_1 = unsupervised_dataloader_1.next()
-            labeled_imgs = minibatch['data']
-            gts = minibatch['label']
+            labeled_imgs,  paste_imgs = minibatch['data']
+            gts, paste_gts = minibatch['label']
             unsup_imgs_0 = unsup_minibatch_0['data']
             unsup_imgs_1 = unsup_minibatch_1['data']
             mask_params = unsup_minibatch_0['mask_params']
@@ -278,6 +310,12 @@ with Engine(custom_parser=parser) as engine:
             unsup_imgs_0 = unsup_imgs_0.cuda(non_blocking=True)
             unsup_imgs_1 = unsup_imgs_1.cuda(non_blocking=True)
             mask_params = mask_params.cuda(non_blocking=True)
+
+            if paste_imgs:
+                paste_imgs = paste_imgs.cuda()
+                paste_gts = paste_gts.long().cuda() # TO DO HERE
+                labeled_imgs, gts = dynamic_copy_paste(images_sup, labels_sup, paste_img, paste_label, query_cat)
+                del paste_img, paste_label
 
             # unsupervised loss on model/branch#1
             batch_mix_masks = mask_params
@@ -379,7 +417,7 @@ with Engine(custom_parser=parser) as engine:
                         )
                         # down sample
 
-                        # if cfg_contra.get("negative_high_entropy", True):
+                        # if config_contra.get("negative_high_entropy", True):
                         high_mask_all = torch.cat(
                             (
                                 (gts.unsqueeze(1) != 255).float(),
@@ -413,7 +451,7 @@ with Engine(custom_parser=parser) as engine:
                             mode="nearest",
                         )
 
-                    # if not cfg_contra.get("anchor_ema", False): # delete if not needed
+                    # if not config_contra.get("anchor_ema", False): # delete if not needed
                     new_keys, contra_loss = compute_contra_memobank_loss(
                         s_rep_all,
                         gts_small.long(),
