@@ -466,7 +466,6 @@ with Engine(custom_parser=parser) as engine:
                     with torch.no_grad():
                         t_rep_unsup, t_unsup_pred = model(unsup_imgs_mixed, step=2, return_rep=True, no_upscale=True)
                         t_unsup_pred_large = F.interpolate(t_unsup_pred, size=gts.shape[1:], mode='bilinear', align_corners=True)
-                        t_unsup_prob_mixed = F.softmax(t_unsup_pred, dim=1)
                         t_unsup_prob_mixed_large = F.softmax(t_unsup_pred_large, dim=1)
                         t_unsup_prob_mixed_labels = torch.max(t_unsup_prob_mixed_large)[1]
                     t_rep_all = torch.cat([t_rep_sup, t_rep_unsup])
@@ -477,7 +476,7 @@ with Engine(custom_parser=parser) as engine:
                     )
 
                     with torch.no_grad():
-                        entropy = -torch.sum(t_unsup_prob_mixed_large * torch.log(t_unsup_prob_mixed_large + 1e-10), dim=1)
+                        entropy = -torch.sum(t_unsup_prob_mixed * torch.log(t_unsup_prob_mixed + 1e-10), dim=1)
 
                         low_thresh = np.percentile(
                             entropy[t_unsup_labels_mixed != 255].cpu().numpy().flatten(), alpha_t
