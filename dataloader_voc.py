@@ -185,7 +185,7 @@ class VOC(BaseDataset):
                         extra_dict[k] = extra_dict[k].float()
 
         output_dict = dict(data=img, fn=str(names),
-                           n=len(self._file_names))
+                           n=len(self._file_names), id=index)
         if gt is not None:
             extra_dict['label'] = gt
 

@@ -22,14 +22,16 @@ class Network(nn.Module):
         for param in self.branch2.parameters():
             param.detach_()
 
-    def forward(self, data, step=1, cur_iter=None, generate_pseudo=False, return_rep=False, no_upscale=False):
+    def forward(self, data, step=1, cur_iter=None, generate_pseudo=False,
+                    return_rep=False, no_upscale=False, return_aux=False, update=False):
+
         if not self.training:
-            pred1 = self.branch1(data, no_upscale)
+            pred1 = self.branch1(data, no_upscale, return_aux)
             return pred1
 
         if generate_pseudo:
             with torch.no_grad():
-                t_rep, t_out = self.branch2(data, no_upscale)
+                t_rep, t_out, _ = self.branch2(data, no_upscale, return_aux)
             if return_rep:
                 return t_rep, t_out
             return t_out
@@ -40,23 +42,50 @@ class Network(nn.Module):
                 t_param.data.copy_(s_param.data)
 
         if step == 1:
-            s_feature, s_out = self.branch1(data, no_upscale)
-            if cur_iter >= self.start_update:
+            s_feature, s_out, pred_aux = self.branch1(data, no_upscale, return_aux)
+            if cur_iter >= self.start_update and update:
                 self._update_ema_variables(self.config.ema_decay, cur_iter)
-            if return_rep:
+            if return_rep and not return_aux:
                 return s_feature, s_out
+            if return_rep and return_aux:
+                return s_feature, s_out, pred_aux
+            if return_aux:
+                return s_out, pred_aux
+
             return s_out
 
         if step == 2:
             with torch.no_grad():
-                t_feature, t_out = self.branch2(data, no_upscale)
-                if return_rep:
+                t_feature, t_out, pred_aux = self.branch2(data, no_upscale, return_aux)
+                if return_rep and not return_aux:
                     return t_feature, t_out
+                if return_rep and return_aux:
+                    return t_feature, t_out, pred_aux
+                if return_aux:
+                    return t_out, pred_aux
                 return t_out
 
     def _update_ema_variables(self, ema_decay, cur_step):
         for t_param, s_param in zip(self.branch2.parameters(), self.branch1.parameters()):
             t_param.data = t_param.data * ema_decay + (1 - ema_decay) * s_param.data
+
+
+class Aux_Module(nn.Module):
+    def __init__(self, in_planes, num_classes=19, norm_layer=nn.BatchNorm2d):
+        super(Aux_Module, self).__init__()
+
+        norm_layer = norm_layer
+        self.aux = nn.Sequential(
+                nn.Conv2d(in_planes, 256, kernel_size=3, stride=1, padding=1),
+                norm_layer(256),
+                nn.ReLU(inplace=True),
+                nn.Dropout2d(0.1),
+                nn.Conv2d(256, num_classes, kernel_size=1, stride=1, padding=0, bias=True))
+
+    def forward(self, x):
+        res = self.aux(x)
+        return res
+
 
 class SingleNetwork(nn.Module):
     def __init__(self, num_classes, criterion, norm_layer, pretrained_model=None, config=None):
@@ -76,27 +105,39 @@ class SingleNetwork(nn.Module):
         self.business_layer = []
         self.business_layer.append(self.head)
         self.criterion = criterion
+        cfg_aux = config.aux_loss
+        self.use_aux = cfg_aux['use_auxloss']
+        if cfg_aux['use_auxloss']:
+            self.auxor = Aux_Module(cfg_aux['aux_plane'], num_classes, norm_layer)
 
         self.classifier = nn.Conv2d(256, num_classes, kernel_size=1, bias=True)
         self.business_layer.append(self.classifier)
 
 
-    def forward(self, data, no_upscale=False):
-        b, c, h, w = data.shape
+    def forward(self, data, no_upscale=False, return_aux=False):
+        h, w = data.shape[-1], data.shape[-2]
         blocks = self.backbone(data)
+        x1,x2,x3,x4 = blocks
+        v3plus_feature = self.head(blocks)
+
+        if self.use_aux:
+            # feat1 used as dsn loss as default, f1 is layer2's output as default
+            pred_aux = self.auxor(x3)
+            pred_aux = F.upsample(input=pred_aux, size=(h, w), mode='bilinear', align_corners=True)
 
         # v3plus_feature = self.head(blocks)
         # pred = self.classifier(v3plus_feature)
-        v3plus_feature = self.head(blocks)
         pred = v3plus_feature["pred"]
         if "rep" in v3plus_feature:
             rep = v3plus_feature["rep"]
+
         if not no_upscale:
             pred = F.interpolate(pred, size=(h, w), mode='bilinear', align_corners=True)
 
-        if self.training:
-            return rep, pred
-            # return v3plus_feature, pred
+        if return_aux and self.training:
+            return rep, pred, pred_aux
+        elif self.training:
+            return rep, pred, None
         return pred
 
     # @staticmethod

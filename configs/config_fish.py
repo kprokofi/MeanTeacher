@@ -57,7 +57,7 @@ def get_config_fish():
 
 
     ''' Experiments Setting '''
-    C.labeled_ratio = 8  # ratio of labeled set
+    C.labeled_ratio = 16  # ratio of labeled set
     C.train_source = osp.join(C.dataset_path, "labled_{}.txt".format(C.labeled_ratio))
     C.unsup_source = osp.join(C.dataset_path, "unlabled_{}.txt".format(C.labeled_ratio))
     C.eval_source = osp.join(C.dataset_path)
@@ -79,7 +79,7 @@ def get_config_fish():
 
     C.drop_percent = 80
     C.start_unsupervised_training=1.
-    C.unsup_contra_weight=.6
+    C.unsup_contra_weight=.7
     C.use_contrastive_learning=True
     C.negative_high_entropy=True
     C.low_rank=1

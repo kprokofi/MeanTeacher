@@ -6,6 +6,7 @@ import time
 import argparse
 import math
 from tqdm import tqdm
+import random
 
 import torch
 import torch.nn as nn
@@ -23,9 +24,10 @@ from dataloader_voc import VOC
 from dataloader import Dataset_uni, ValPre
 from network import Network
 from utils.init_func import init_weight, group_weight
-from utils.contrastive_loss import compute_contra_memobank_loss, get_consit_criterion
+from utils.contrastive_loss import compute_contra_memobank_loss
 from engine.lr_policy import WarmUpPolyLR
 from utils.pyt_utils import parse_devices
+from utils.ael_utils import dynamic_copy_paste, sample_from_bank, generate_cutmix_mask, update_cutmix_bank, cal_category_confidence, get_criterion
 from engine.engine import Engine
 from seg_opr.loss_opr import SigmoidFocalLoss, ProbOhemCrossEntropy2d
 from eval import SegEvaluator
@@ -55,14 +57,16 @@ else:
     is_debug = False
 
 def prepare_data(engine, dataset, config, collate_fn):
-    train_loader, train_sampler = get_train_loader(engine, dataset, train_source=config.train_source, \
+    train_loader_0, train_sampler = get_train_loader(engine, dataset, train_source=config.train_source, \
+                                                   unsupervised=False, collate_fn=collate_fn, config=config)
+    train_loader_1, train_sampler = get_train_loader(engine, dataset, train_source=config.train_source, \
                                                    unsupervised=False, collate_fn=collate_fn, config=config)
     unsupervised_train_loader_0, unsupervised_train_sampler_0 = get_train_loader(engine, dataset, \
                 train_source=config.unsup_source, unsupervised=True, collate_fn=mask_collate_fn, config=config)
     unsupervised_train_loader_1, unsupervised_train_sampler_1 = get_train_loader(engine, dataset, \
                 train_source=config.unsup_source, unsupervised=True, collate_fn=collate_fn, config=config)
 
-    return (train_loader, train_sampler, unsupervised_train_loader_0,
+    return (train_loader_0, train_loader_1, train_sampler, unsupervised_train_loader_0,
             unsupervised_train_sampler_0, unsupervised_train_loader_1,
             unsupervised_train_sampler_1)
 
@@ -163,16 +167,16 @@ with Engine(custom_parser=parser) as engine:
     collate_fn = SegCollate()
     mask_collate_fn = SegCollate(batch_aug_fn=add_mask_params_to_batch)
 
-    train_loader, train_sampler, unsupervised_train_loader_0, \
+    train_loader_0, train_loader_1, train_sampler, unsupervised_train_loader_0, \
     unsupervised_train_sampler_0, unsupervised_train_loader_1, \
     unsupervised_train_sampler_1 = prepare_data(engine, dataset, config, collate_fn)
 
-    if config.consistency:
-        class_criterion = torch.rand(3, config.num_classes).type(torch.float32)
+    if config.consistency_acm or config.consistency_acp:
+        class_criterion = torch.rand(config.num_classes).type(torch.float32)
         cutmix_bank = torch.zeros(config.num_classes, unsupervised_train_loader_0.dataset.__len__()).cuda()
         class_momentum = 0.999
         all_cat = [i for i in range(config.num_classes)]
-        ignore_cat = [0]
+        ignore_cat = config.ignore_cat
         target_cat = list(set(all_cat)-set(ignore_cat))
         num_cat = config.number_cat
         area_thresh = config.area_thresh
@@ -187,10 +191,9 @@ with Engine(custom_parser=parser) as engine:
         engine.link_tb(tb_dir, generate_tb_dir)
 
     # config network and criterion
-    criterion = nn.CrossEntropyLoss(reduction='mean', ignore_index=255)
-    if config.consistency:
-        sample = config.samples
-        criterion_csst = get_consit_criterion(config, cons=True)
+    criterion = get_criterion(config) # try to change criterion from Ohem to ordinary CE
+    if config.consistency_acm or config.consistency_acp:
+        criterion_csst = get_criterion(config, cons=True)
     else:
         criterion_csst = torch.nn.CrossEntropyLoss(ignore_index=255)
 
@@ -217,7 +220,7 @@ with Engine(custom_parser=parser) as engine:
                                BatchNorm2d, base_lr)
     for module in model.branch1.business_layer:
         params_list_l = group_weight(params_list_l, module, BatchNorm2d,
-                                   base_lr)        # head lr * 10
+                                   base_lr)
 
     optimizer_l = torch.optim.SGD(params_list_l,
                                 lr=base_lr,
@@ -226,10 +229,10 @@ with Engine(custom_parser=parser) as engine:
 
     params_list_r = []
     params_list_r = group_weight(params_list_r, model.branch2.backbone,
-                               BatchNorm2d, base_lr)
+                               BatchNorm2d, 0.0)
     for module in model.branch2.business_layer:
         params_list_r = group_weight(params_list_r, module, BatchNorm2d,
-                                   base_lr)        # head lr * 10
+                                   0.0)        # head lr * 10
 
 
 
@@ -247,7 +250,7 @@ with Engine(custom_parser=parser) as engine:
         model = DataParallelModel(model, device_ids=engine.devices)
         model.to(device)
 
-    engine.register_state(dataloader=train_loader, model=model,
+    engine.register_state(dataloader=train_loader_0, model=model,
                           optimizer_l=optimizer_l)
     if engine.continue_state_object:
         engine.restore_checkpoint()
@@ -272,38 +275,45 @@ with Engine(custom_parser=parser) as engine:
         else:
             pbar = tqdm(range(config.niters_per_epoch), file=sys.stdout, bar_format=bar_format)
 
-        dataloader = iter(train_loader)
+        dataloader_0 = iter(train_loader_0)
+        dataloader_1 = iter(train_loader_1)
         unsupervised_dataloader_0 = iter(unsupervised_train_loader_0)
         unsupervised_dataloader_1 = iter(unsupervised_train_loader_1)
 
-        if config.consistency:
-            conf = 1 - class_criterion[0]
-            conf = conf[target_cat]
-            conf = (conf**0.5).numpy()
-            conf_print = np.exp(conf)/np.sum(np.exp(conf))
-            if engine.local_rank == 0:
-                print('epoch [',epoch,': ]', 'sample_rate_target_class_conf', conf_print)
-                print('epoch [',epoch,': ]', 'criterion_per_class' ,class_criterion[0])
-                print('epoch [',epoch,': ]', 'sample_rate_per_class_conf' ,(1-class_criterion[0])/(torch.max(1-class_criterion[0])+1e-12))
-            query_cat = []
-            for rc_idx in range(num_cat):
-                query_cat.append(np.random.choice(target_cat, p=conf))
-            query_cat = list(set(query_cat))
-
         ''' supervised part '''
         start_time = time.time()
+
         for idx in pbar:
             global_index += 1
             optimizer_l.zero_grad()
             engine.update_iteration(epoch, idx)
 
-            minibatch = dataloader.next()
+            if (config.consistency_acm or config.consistency_acp) and config.num_classes > 2:
+                conf = 1 - class_criterion
+                conf = conf[target_cat]
+                conf = (conf**0.5).numpy()
+                conf = np.exp(conf)/np.sum(np.exp(conf))
+                query_cat = []
+                for rc_idx in range(num_cat):
+                    query_cat.append(np.random.choice(target_cat, p=conf))
+                query_cat = list(set(query_cat))
+            else:
+                # 0 - background (discard), 1 - object (always choose)
+                conf = [0., 1.]
+                query_cat = [1]
+
+            minibatch_0 = dataloader_0.next()
+            minibatch_1 = dataloader_1.next()
             unsup_minibatch_0 = unsupervised_dataloader_0.next()
             unsup_minibatch_1 = unsupervised_dataloader_1.next()
-            labeled_imgs,  paste_imgs = minibatch['data']
-            gts, paste_gts = minibatch['label']
+            labeled_imgs = minibatch_0['data']
+            gts = minibatch_0['label']
+            paste_imgs = minibatch_1['data']
+            paste_gts = minibatch_1['label']
             unsup_imgs_0 = unsup_minibatch_0['data']
             unsup_imgs_1 = unsup_minibatch_1['data']
+            img_id_0 = unsup_minibatch_0['id']
+            img_id_1 = unsup_minibatch_1['id']
             mask_params = unsup_minibatch_0['mask_params']
             labeled_imgs = labeled_imgs.cuda(non_blocking=True)
             gts = gts.cuda(non_blocking=True)
@@ -311,98 +321,177 @@ with Engine(custom_parser=parser) as engine:
             unsup_imgs_1 = unsup_imgs_1.cuda(non_blocking=True)
             mask_params = mask_params.cuda(non_blocking=True)
 
-            if paste_imgs:
-                paste_imgs = paste_imgs.cuda()
-                paste_gts = paste_gts.long().cuda() # TO DO HERE
-                labeled_imgs, gts = dynamic_copy_paste(images_sup, labels_sup, paste_img, paste_label, query_cat)
-                del paste_img, paste_label
-
-            # unsupervised loss on model/branch#1
-            batch_mix_masks = mask_params
-            unsup_imgs_mixed = unsup_imgs_0 * (1 - batch_mix_masks) + unsup_imgs_1 * batch_mix_masks
             current_idx = epoch * config.niters_per_epoch + idx
-            # supervised inference
-            s_rep_sup, s_sup_pred = model(labeled_imgs, step=1, cur_iter=epoch, return_rep=True)
-            batch_mix_masks = batch_mix_masks.reshape((batch_mix_masks.shape[0], unsup_imgs_0.shape[2],  unsup_imgs_0.shape[3]))
+
+            ### ACP pre-processing ###
+            if config.consistency_acp and (epoch >= config.start_unsupervised_training):
+                paste_imgs = paste_imgs.cuda()
+                paste_gts = paste_gts.long().cuda()
+                labeled_imgs, gts = dynamic_copy_paste(labeled_imgs, paste_imgs, gts, paste_gts, query_cat)
+                del paste_imgs, paste_gts
+            else:
+                del paste_imgs, paste_gts
+
+            ### Supervised inference ###
+            s_rep_sup, s_sup_pred, aux_pred = model(labeled_imgs, step=1, cur_iter=epoch, return_rep=True, return_aux=True, update=True)
+
             with torch.no_grad():
-                t_rep_sup, t_sup_pred = model(labeled_imgs, step=2, return_rep=True, no_upscale=True)
+                t_rep_sup, t_sup_pred, t_aux_pred = model(labeled_imgs, step=2, return_rep=True, no_upscale=True, return_aux=True)
+                t_sup_pred_large = F.interpolate(t_sup_pred, size=gts.shape[1:], mode='bilinear', align_corners=True)
+                t_conf_sup_pred_large = F.softmax(t_sup_pred_large, dim=1)
+                t_logits_sup_pred_large, t_labels_sup_large = torch.max(t_conf_sup_pred_large, dim=1)
+                t_labels_sup_large = t_labels_sup_large.long()
 
-            if epoch >= config.start_unsupervised_training:
-                with torch.no_grad():
-                    # unsupervised cutmix inference
-                    t_unsup_pred_0 = model(unsup_imgs_0, generate_pseudo=True, step=2)
-                    t_unsup_pred_1 = model(unsup_imgs_1, generate_pseudo=True, step=2)
-
-                logits_t_unsup_label_0, t_unsup_label_0 = torch.max(t_unsup_pred_0, dim=1)
-                logits_t_unsup_label_1, t_unsup_label_1 = torch.max(t_unsup_pred_1, dim=1)
-
-                unsup_labels_mixed = t_unsup_label_0 * (1 - batch_mix_masks) + t_unsup_label_1 * batch_mix_masks
-                unsup_labels_mixed = unsup_labels_mixed.long()
-                # unsupervised student cutmix inference
-                s_rep_unsup, s_unsup_pred = model(unsup_imgs_mixed, step=1, cur_iter=epoch, return_rep=True)
-
-                # unsupervised teacher cutmix inference
-                with torch.no_grad():
-                    t_rep_unsup, t_unsup_pred = model(unsup_imgs_mixed, step=2, return_rep=True, no_upscale=True)
-                    t_unsup_pred_large = F.interpolate(t_unsup_pred, size=gts.shape[1:], mode='bilinear', align_corners=True)
-                    prob_unsup_teacher_large = F.softmax(t_unsup_pred_large, dim=1)
-
-                prob_sup_teacher =  F.softmax(t_sup_pred, dim=1)
-                prob_unsup_teacher = F.softmax(t_unsup_pred, dim=1)
-
-                s_pred_all = torch.cat([s_sup_pred, s_unsup_pred])
-                s_rep_all = torch.cat([s_rep_sup, s_rep_unsup])
-                t_rep_all = torch.cat([t_rep_sup, t_rep_unsup])
-
-                ### Mean Teacher loss ###
-                ### Filter loss ###
+                # drop pixels with high entropy
                 drop_percent = config.drop_percent
                 percent_unreliable = (100 - drop_percent) * (1 - epoch /config.nepochs)
                 drop_percent = 100 - percent_unreliable
-                batch_size, num_class, h, w = s_unsup_pred.shape
+                batch_size, num_class, h, w = t_sup_pred_large.shape
+
+                entropy = -torch.sum(t_conf_sup_pred_large * torch.log(t_conf_sup_pred_large + 1e-10), dim=1)
+
+                thresh = np.percentile(
+                    entropy[t_labels_sup_large != 255].detach().cpu().numpy().flatten(), drop_percent
+                )
+                thresh_mask = entropy.ge(thresh).bool() * (t_labels_sup_large != 255).bool()
+
+                t_labels_sup_large[thresh_mask] = 255
+                weight_sup = batch_size * h * w / torch.sum(t_labels_sup_large != 255)
+
+            ### Unsupervised inference ###
+            if epoch >= config.start_unsupervised_training:
+
+                ### ACM pre-processing ###
+                if config.consistency_acm:
+                    prob_im = random.random()
+                    if prob_im > 0.5:
+                        image_unsup = unsup_imgs_0
+                        img_id = img_id_0
+                    else:
+                        image_unsup = unsup_imgs_1
+                        img_id = img_id_1
+                    # TODO maybe we can add loop here and draw different samples - not just one for all images.
+                    image_unsup = image_unsup.cuda()
+                    # sample id with target class
+                    image_unsup2 = []
+                    sample_id_bank = []
+                    for _ in range(batch_size):
+                        sample_id, sample_cat = sample_from_bank(cutmix_bank, class_criterion)
+                        sample_id_bank.append(sample_id)
+                        image_unsup2.append(unsupervised_dataloader_0._dataset.__getitem__(index=sample_id)['data'].unsqueeze(0))
+                    image_unsup2 = torch.cat(image_unsup2)
+                    image_unsup2 = image_unsup2.cuda()
+                    # forward on this data
+                    t_preds_unsup_1_large = model(image_unsup, generate_pseudo=True, step=2)
+                    t_preds_unsup_2_large = model(image_unsup2, generate_pseudo=True, step=2)
+                    labels_teacher_unsup_target_cat = torch.max(t_preds_unsup_2_large, dim=1)[1].cpu().numpy()
+                    # generate cutmix mask relying on the $preds_teacher_unsup$
+                    valid_mask_mix = []
+                    for label_map in labels_teacher_unsup_target_cat:
+                        valid_mask_mix.append(generate_cutmix_mask(label_map, sample_cat, area_thresh, no_pad=no_pad, no_slim=no_slim, num_classes=config.num_classes).unsqueeze(0))
+                    valid_mask_mix = torch.cat(valid_mask_mix).unsqueeze(1)
+                    valid_mask_mix = valid_mask_mix.cuda()
+                    # actual mix the images
+                    unsup_imgs_mixed = image_unsup * (1 - valid_mask_mix) + image_unsup2 * valid_mask_mix
+                    #update cutmix bank for each image accordingly
+                    for (sam_id, im_id) in zip(sample_id_bank, img_id):
+                        cutmix_bank = update_cutmix_bank(cutmix_bank, t_preds_unsup_1_large, t_preds_unsup_2_large, im_id, sam_id, area_thresh2)
+                    # mix the teacher labels
+                    t_unsup_pred_mixed = t_preds_unsup_1_large * (1-valid_mask_mix) + t_preds_unsup_2_large * valid_mask_mix
+                    t_unsup_prob_mixed = F.softmax(t_unsup_pred_mixed, dim=1)
+                    t_unsup_logits_mixed, t_unsup_labels_mixed = torch.max(t_unsup_prob_mixed, dim=1)
+                    t_unsup_labels_mixed = t_unsup_labels_mixed.long()
+
+                if not config.consistency_acm:
+                    with torch.no_grad():
+                        # unsupervised cutmix inference
+                        t_rep_unsup_0, t_unsup_pred_0_large = model(unsup_imgs_0, generate_pseudo=True, step=2, return_rep=True)
+                        t_rep_unsup_1, t_unsup_pred_1_large = model(unsup_imgs_1, generate_pseudo=True, step=2, return_rep=True)
+
+                    # unsupervised loss on model/branch#1
+                    batch_mix_masks = mask_params
+                    unsup_imgs_mixed = unsup_imgs_0 * (1 - batch_mix_masks) + unsup_imgs_1 * batch_mix_masks
+
+                    t_unsup_pred_mixed = t_unsup_pred_0_large * (1 - batch_mix_masks) + t_unsup_pred_1_large * batch_mix_masks
+                    t_unsup_prob_mixed = F.softmax(t_unsup_pred_mixed, dim=1)
+                    t_unsup_logits_mixed, t_unsup_labels_mixed = torch.max(t_unsup_prob_mixed, dim=1)
+                    t_unsup_labels_mixed = t_unsup_labels_mixed.long()
+
+                # unsupervised student cutmix inference
+                s_rep_unsup, s_unsup_pred = model(unsup_imgs_mixed, step=1, cur_iter=epoch, return_rep=True, update=False)
+
+                # unsupervised teacher cutmix inference
+                # with torch.no_grad():
+                #     t_rep_unsup, t_unsup_pred = model(unsup_imgs_mixed, step=2, return_rep=True, no_upscale=True)
+                #     t_unsup_pred_large = F.interpolate(t_unsup_pred, size=gts.shape[1:], mode='bilinear', align_corners=True)
+                #     t_unsup_prob_mixed = F.softmax(t_unsup_pred_large, dim=1)
+
+
+                s_pred_all = torch.cat([s_sup_pred, s_unsup_pred])
+                s_rep_all = torch.cat([s_rep_sup, s_rep_unsup])
+
+                ### Mean Teacher loss ###
+                ### Filter loss ###
+                batch_size, num_class, h, w = t_unsup_pred_mixed.shape
                 with torch.no_grad():
                     # drop pixels with high entropy
-                    entropy = -torch.sum(prob_unsup_teacher_large * torch.log(prob_unsup_teacher_large + 1e-10), dim=1)
+                    entropy = -torch.sum(t_unsup_prob_mixed * torch.log(t_unsup_prob_mixed + 1e-10), dim=1)
 
                     thresh = np.percentile(
-                        entropy[unsup_labels_mixed != 255].detach().cpu().numpy().flatten(), drop_percent
+                        entropy[t_unsup_labels_mixed != 255].detach().cpu().numpy().flatten(), drop_percent
                     )
-                    thresh_mask = entropy.ge(thresh).bool() * (unsup_labels_mixed != 255).bool()
+                    thresh_mask = entropy.ge(thresh).bool() * (t_unsup_labels_mixed != 255).bool()
 
-                    unsup_labels_mixed[thresh_mask] = 255
-                    weight = batch_size * h * w / torch.sum(unsup_labels_mixed != 255)
+                    t_unsup_labels_mixed[thresh_mask] = 255
+                    weight_unsup = batch_size * h * w / torch.sum(t_unsup_labels_mixed != 255)
 
-                CE_l = F.cross_entropy(s_unsup_pred, unsup_labels_mixed, ignore_index=255)
-                csst_loss = weight * CE_l
-                # csst_loss = criterion_csst(s_unsup_pred, unsup_labels_mixed)
+                if config.consistency_acm or config.consistency_acp:
+                    loss_consistency1 = criterion_csst(s_sup_pred, t_logits_sup_pred_large, t_labels_sup_large, class_criterion) / engine.world_size
+                    loss_consistency2 = criterion_csst(s_unsup_pred, t_unsup_logits_mixed, t_unsup_labels_mixed, class_criterion) / engine.world_size
+                    csst_loss = (loss_consistency1 + loss_consistency2) * config.unsup_weight
+                else:
+                    ### unsup loss ###
+                    csst_loss = weight_unsup * criterion_csst(s_unsup_pred, t_unsup_labels_mixed)
 
                 dist.all_reduce(csst_loss, dist.ReduceOp.SUM)
-                csst_loss = csst_loss / engine.world_size
-                csst_loss = csst_loss * config.unsup_weight
+
+                with torch.no_grad():
+                    if config.consistency_acm or config.consistency_acp:
+                        category_entropy = cal_category_confidence(s_sup_pred.detach(), s_unsup_pred.detach(), gts.detach(), config.num_classes)
+                        # perform momentum update
+                        class_criterion = class_criterion * class_momentum + category_entropy * (1 - class_momentum)
 
                 if config.use_contrastive_learning:
+                    prob_sup_teacher =  F.softmax(t_sup_pred, dim=1)
+                    with torch.no_grad():
+                        t_rep_unsup, t_unsup_pred = model(unsup_imgs_mixed, step=2, return_rep=True, no_upscale=True)
+                        t_unsup_pred_large = F.interpolate(t_unsup_pred, size=gts.shape[1:], mode='bilinear', align_corners=True)
+                        t_unsup_prob_mixed = F.softmax(t_unsup_pred, dim=1)
+                        t_unsup_prob_mixed_large = F.softmax(t_unsup_pred_large, dim=1)
+                        t_unsup_prob_mixed_labels = torch.max(t_unsup_prob_mixed_large)[1]
+                    t_rep_all = torch.cat([t_rep_sup, t_rep_unsup])
+
                     ### Contrastive loss ###
                     alpha_t = config.low_entropy_threshold * (
                         1 - epoch / config.nepochs
                     )
 
                     with torch.no_grad():
-                        prob = torch.softmax(t_unsup_pred_large, dim=1) # teacher inference -> get probs
-                        entropy = -torch.sum(prob * torch.log(prob + 1e-10), dim=1)
+                        entropy = -torch.sum(t_unsup_prob_mixed_large * torch.log(t_unsup_prob_mixed_large + 1e-10), dim=1)
 
                         low_thresh = np.percentile(
-                            entropy[unsup_labels_mixed != 255].cpu().numpy().flatten(), alpha_t
+                            entropy[t_unsup_labels_mixed != 255].cpu().numpy().flatten(), alpha_t
                         )
                         low_entropy_mask = (
-                            entropy.le(low_thresh).float() * (unsup_labels_mixed != 255).bool()
+                            entropy.le(low_thresh).float() * (t_unsup_labels_mixed != 255).bool()
                         )
 
                         high_thresh = np.percentile(
-                            entropy[unsup_labels_mixed != 255].cpu().numpy().flatten(),
+                            entropy[t_unsup_labels_mixed != 255].cpu().numpy().flatten(),
                             100 - alpha_t,
                         )
                         high_entropy_mask = (
-                            entropy.ge(high_thresh).float() * (unsup_labels_mixed != 255).bool()
+                            entropy.ge(high_thresh).float() * (t_unsup_labels_mixed != 255).bool()
                         )
 
                         low_mask_all = torch.cat(
@@ -417,24 +506,13 @@ with Engine(custom_parser=parser) as engine:
                         )
                         # down sample
 
-                        # if config_contra.get("negative_high_entropy", True):
                         high_mask_all = torch.cat(
                             (
                                 (gts.unsqueeze(1) != 255).float(),
                                 high_entropy_mask.unsqueeze(1),
                             )
                         )
-                        # else:
-                        #     contra_flag += " low"
-                        #     high_mask_all = torch.cat(
-                        #         (
-                        #             (gts.unsqueeze(1) != 255).float(),
-                        #             torch.ones(logits_u_aug.shape)
-                        #             .float()
-                        #             .unsqueeze(1)
-                        #             .cuda(),
-                        #         ),
-                        #     )
+
                         high_mask_all = F.interpolate(
                             high_mask_all, size=s_rep_all.shape[2:], mode="nearest"
                         )  # down sample
@@ -446,7 +524,7 @@ with Engine(custom_parser=parser) as engine:
                             mode="nearest",
                         )
                         label_u_small = F.interpolate(
-                            label_onehot(unsup_labels_mixed, config.num_classes),
+                            label_onehot(t_unsup_labels_mixed, config.num_classes),
                             size=s_rep_all.shape[2:],
                             mode="nearest",
                         )
@@ -457,7 +535,7 @@ with Engine(custom_parser=parser) as engine:
                         gts_small.long(),
                         label_u_small.long(),
                         prob_sup_teacher.detach(),
-                        prob_unsup_teacher.detach(),
+                        t_unsup_prob_mixed.detach(),
                         low_mask_all,
                         high_mask_all,
                         config,
@@ -466,22 +544,6 @@ with Engine(custom_parser=parser) as engine:
                         queue_size,
                         t_rep_all.detach(),
                     )
-                    # else:
-                    #     prototype, new_keys, contra_loss = compute_contra_memobank_loss(
-                    #         rep_all,
-                    #         gts_small.long(),
-                    #         label_u_small.long(),
-                    #         prob_l_teacher.detach(),
-                    #         prob_u_teacher.detach(),
-                    #         low_mask_all,
-                    #         high_mask_all,
-                    #         cfg_contra,
-                    #         memobank,
-                    #         queue_ptrlis,
-                    #         queue_size,
-                    #         rep_all_teacher.detach(),
-                    #         prototype,
-                    #     )
 
                     dist.all_reduce(contra_loss)
                     contra_loss = contra_loss / engine.world_size
@@ -491,18 +553,18 @@ with Engine(custom_parser=parser) as engine:
                     contra_loss = 0 * s_rep_sup.sum()
 
             else:
-                csst_loss = unsup_loss = 0 * s_rep_sup.sum()
+                csst_loss = 0 * s_rep_sup.sum()
                 contra_loss = 0 * s_rep_sup.sum()
 
             ### Supervised loss For Student ###
-            loss_sup = criterion(s_sup_pred, gts)
+            loss_sup = criterion(s_sup_pred, gts, aux_pred)
             dist.all_reduce(loss_sup, dist.ReduceOp.SUM)
             loss_sup = loss_sup / engine.world_size
 
             ### Supervised loss For Teacher. No Backward ###
             with torch.no_grad():
                 t_sup_pred_large = F.interpolate(t_sup_pred, size=gts.shape[1:], mode='bilinear', align_corners=True)
-                loss_sup_t = criterion(t_sup_pred_large, gts)
+                loss_sup_t = criterion(t_sup_pred_large, gts, t_aux_pred)
                 dist.all_reduce(loss_sup_t, dist.ReduceOp.SUM)
                 loss_sup_t = loss_sup_t / engine.world_size
 
@@ -529,9 +591,17 @@ with Engine(custom_parser=parser) as engine:
                         + ' Iter{}/{}:'.format(idx + 1, config.niters_per_epoch) \
                         + ' lr=%.2e' % lr \
                         + ' loss_sup=%.2f' % (sum_loss_sup / global_index) \
-                        + ' loss_sup_t=%.2f' % (sum_loss_sup_t / global_index) \
-                        + ' loss_csst=%.4f' % (sum_csst / global_index) \
-                        + ' loss_contra=%.4f' % (sum_contra / global_index)
+                        + ' loss_sup_t=%.2f' % (sum_loss_sup_t / global_index)
+
+            if (epoch >= config.start_unsupervised_training):
+                print_str_2 = ' loss_csst=%.4f' % (sum_csst / global_index) \
+                                + ' loss_contra=%.4f' % (sum_contra / global_index)
+                print_str = print_str + print_str_2
+
+            if (config.consistency_acm or config.consistency_acp):
+                print_str_3 = f' sample_rate_target_class_conf {conf}' \
+                              + f' criterion_per_class {class_criterion}'
+                print_str = print_str + print_str_3
 
             pbar.set_description(print_str, refresh=False)
 

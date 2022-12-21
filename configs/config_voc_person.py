@@ -77,8 +77,8 @@ def get_config_voc_person():
     """Contrastive learning"""
     C.drop_percent = 80
     C.start_unsupervised_training=1.
-    C.unsup_contra_weight=.6
-    C.use_contrastive_learning=True
+    C.unsup_contra_weight=.7
+    C.use_contrastive_learning=False
     C.negative_high_entropy=True
     C.low_rank=1
     C.high_rank=2
@@ -127,6 +127,17 @@ def get_config_voc_person():
     C.num_workers = 6
     C.train_scale_array = [0.5, 0.75, 1, 1.5, 1.75, 2.0]
     C.warm_up_epoch = 0
+
+    '''Consistency'''
+    C.consistency_acp = True
+    C.consistency_acm = True
+    C.ignore_cat = []
+    C.number_cat = 1
+    C.area_thresh = 0.03
+    C.area_thresh2 = 0.03
+    C.criterion = dict(threshold=0.7, aux_loss_wght=0.4, cons=dict(sample=True, gamma=2),
+                        type='ohem', kwargs=dict(thresh=0.7, min_kept=100000))
+    C.aux_loss = dict(aux_plane=1024, loss_weight=0.4, use_auxloss=True)
 
     ''' Eval Config '''
     C.eval_iter = 30
