@@ -57,7 +57,7 @@ def get_config_city_4():
 
 
     ''' Experiments Setting '''
-    C.labeled_ratio = 16   # ratio of labeled set
+    C.labeled_ratio = 8   # ratio of labeled set
     C.train_source = osp.join(C.dataset_path, "labled_{}.txt".format(C.labeled_ratio))
     C.unsup_source = osp.join(C.dataset_path, "unlabled_{}.txt".format(C.labeled_ratio))
     C.eval_source = osp.join(C.dataset_path)
@@ -66,9 +66,10 @@ def get_config_city_4():
     C.bn_eps = 1e-5
     C.bn_momentum = 0.1
 
-    C.unsup_weight = 1.
+    C.unsup_weight = 0.65
     C.ema_decay = 0.99
 
+    '''Contrastive loss'''
     C.drop_percent = 80
     C.start_unsupervised_training=1.
     C.unsup_contra_weight=.7
@@ -83,6 +84,17 @@ def get_config_city_4():
     C.num_negatives=50
     C.num_queries=256
     C.temperature=0.5
+
+    '''Consistency'''
+    C.consistency_acp = True
+    C.consistency_acm = True
+    C.ignore_cat = []
+    C.number_cat = 2
+    C.area_thresh = 0.03
+    C.area_thresh2 = 0.03
+    C.criterion = dict(threshold=0.7, cons=dict(sample=True, gamma=2),
+                        type='ohem', kwargs=dict(thresh=0.7, min_kept=100000))
+    C.aux_loss = dict(aux_plane=1024, loss_weight=0.4, use_auxloss=True)
 
     """Cutmix Config"""
     C.cutmix_mask_prop_range = (0.25, 0.5)

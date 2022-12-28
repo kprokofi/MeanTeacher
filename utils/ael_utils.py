@@ -231,13 +231,14 @@ class Criterion(nn.Module):
             self._criterion = nn.CrossEntropyLoss(ignore_index=ignore_index)
             self._criterion1 = nn.CrossEntropyLoss(ignore_index=ignore_index, weight=weights)
 
-    def forward(self, preds, target):
+    def forward(self, preds, target, aux):
         h, w = target.size(1), target.size(2)
         if self._aux_weight > 0:  # require aux loss
-            main_pred, aux_pred = preds
+            main_pred = preds
+            aux_pred = aux
             main_h, main_w = main_pred.size(2), main_pred.size(3)
             aux_h, aux_w = aux_pred.size(2), aux_pred.size(3)
-            assert len(preds) == 2 and main_h == aux_h and main_w == aux_w and main_h == h and main_w == w
+            assert main_h == aux_h and main_w == aux_w and main_h == h and main_w == w
             if self.use_weight:
                 loss1 = self._criterion(main_pred, target) + self._criterion1(main_pred, target)
             else:

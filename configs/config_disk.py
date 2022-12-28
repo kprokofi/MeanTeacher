@@ -57,7 +57,7 @@ def get_config_disk():
 
 
     ''' Experiments Setting '''
-    C.labeled_ratio = 16     # ratio of labeled set
+    C.labeled_ratio = 8     # ratio of labeled set
     C.train_source = osp.join(C.dataset_path, "labled_{}.txt".format(C.labeled_ratio))
     C.unsup_source = osp.join(C.dataset_path, "unlabled_{}.txt".format(C.labeled_ratio))
     C.eval_source = osp.join(C.dataset_path)
@@ -66,7 +66,7 @@ def get_config_disk():
     C.bn_eps = 1e-5
     C.bn_momentum = 0.1
 
-    C.unsup_weight = 1.
+    C.unsup_weight = 1.0
     C.ema_decay = 0.99
 
     """Cutmix Config"""
@@ -100,20 +100,10 @@ def get_config_disk():
     C.number_cat = 1
     C.area_thresh = 0.03
     C.area_thresh2 = 0.03
-    C.criterion = dict(threshold=0.7, aux_loss_wght=0.4, cons=dict(sample=True, gamma=2),
+    C.criterion = dict(threshold=0.7, cons=dict(sample=True, gamma=2),
                         type='ohem', kwargs=dict(thresh=0.7, min_kept=100000))
     C.aux_loss = dict(aux_plane=1024, loss_weight=0.4, use_auxloss=True)
 
-    '''Consistency'''
-    C.consistency_acp = False
-    C.consistency_acm = False
-    C.ignore_cat = []
-    C.number_cat = 1
-    C.area_thresh = 0.03
-    C.area_thresh2 = 0.03
-    C.criterion = dict(threshold=0.7, aux_loss_wght=0.4, cons=dict(sample=True, gamma=2),
-                        type='ohem', kwargs=dict(thresh=0.7, min_kept=100000))
-    C.aux_loss = dict(aux_plane=1024, loss_weight=0.4, use_auxloss=True)
 
     ''' Image Config '''
     C.num_classes = 2

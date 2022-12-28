@@ -49,8 +49,6 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--dev', default='1', type=str)
 parser.add_argument('--dataset', default='VOC', type=str)
 
-os.environ['MASTER_PORT'] = '169711'
-
 if os.getenv('debug') is not None:
     is_debug = os.environ['debug']
 else:
@@ -263,6 +261,7 @@ with Engine(custom_parser=parser) as engine:
     sum_contra = 0
     global_index = 0
     global_time = 0
+    global_confidence = [0 for _ in range(config.num_classes)]
     model.train()
 
     for epoch in range(engine.state.epoch, config.nepochs):
@@ -382,8 +381,9 @@ with Engine(custom_parser=parser) as engine:
                     image_unsup2 = torch.cat(image_unsup2)
                     image_unsup2 = image_unsup2.cuda()
                     # forward on this data
-                    t_preds_unsup_1_large = model(image_unsup, generate_pseudo=True, step=2)
-                    t_preds_unsup_2_large = model(image_unsup2, generate_pseudo=True, step=2)
+                    t_preds_unsup_1_large = model(image_unsup, step=2)
+                    t_preds_unsup_2_large = model(image_unsup2, step=2)
+
                     labels_teacher_unsup_target_cat = torch.max(t_preds_unsup_2_large, dim=1)[1].cpu().numpy()
                     # generate cutmix mask relying on the $preds_teacher_unsup$
                     valid_mask_mix = []
@@ -402,11 +402,11 @@ with Engine(custom_parser=parser) as engine:
                     t_unsup_logits_mixed, t_unsup_labels_mixed = torch.max(t_unsup_prob_mixed, dim=1)
                     t_unsup_labels_mixed = t_unsup_labels_mixed.long()
 
-                if not config.consistency_acm:
+                else:
                     with torch.no_grad():
                         # unsupervised cutmix inference
-                        t_rep_unsup_0, t_unsup_pred_0_large = model(unsup_imgs_0, generate_pseudo=True, step=2, return_rep=True)
-                        t_rep_unsup_1, t_unsup_pred_1_large = model(unsup_imgs_1, generate_pseudo=True, step=2, return_rep=True)
+                        t_unsup_pred_0_large = model(unsup_imgs_0, step=2, return_rep=False)
+                        t_unsup_pred_1_large = model(unsup_imgs_1, step=2, return_rep=False)
 
                     # unsupervised loss on model/branch#1
                     batch_mix_masks = mask_params
@@ -419,13 +419,6 @@ with Engine(custom_parser=parser) as engine:
 
                 # unsupervised student cutmix inference
                 s_rep_unsup, s_unsup_pred = model(unsup_imgs_mixed, step=1, cur_iter=epoch, return_rep=True, update=False)
-
-                # unsupervised teacher cutmix inference
-                # with torch.no_grad():
-                #     t_rep_unsup, t_unsup_pred = model(unsup_imgs_mixed, step=2, return_rep=True, no_upscale=True)
-                #     t_unsup_pred_large = F.interpolate(t_unsup_pred, size=gts.shape[1:], mode='bilinear', align_corners=True)
-                #     t_unsup_prob_mixed = F.softmax(t_unsup_pred_large, dim=1)
-
 
                 s_pred_all = torch.cat([s_sup_pred, s_unsup_pred])
                 s_rep_all = torch.cat([s_rep_sup, s_rep_unsup])
@@ -464,10 +457,8 @@ with Engine(custom_parser=parser) as engine:
                 if config.use_contrastive_learning:
                     prob_sup_teacher =  F.softmax(t_sup_pred, dim=1)
                     with torch.no_grad():
-                        t_rep_unsup, t_unsup_pred = model(unsup_imgs_mixed, step=2, return_rep=True, no_upscale=True)
-                        t_unsup_pred_large = F.interpolate(t_unsup_pred, size=gts.shape[1:], mode='bilinear', align_corners=True)
-                        t_unsup_prob_mixed_large = F.softmax(t_unsup_pred_large, dim=1)
-                        t_unsup_prob_mixed_labels = torch.max(t_unsup_prob_mixed_large)[1]
+                        # get the representations from teacher rep head
+                        t_rep_unsup, t_unsup_mixed = model(unsup_imgs_mixed, step=2, return_rep=True, no_upscale=True)
                     t_rep_all = torch.cat([t_rep_sup, t_rep_unsup])
 
                     ### Contrastive loss ###
@@ -534,7 +525,7 @@ with Engine(custom_parser=parser) as engine:
                         gts_small.long(),
                         label_u_small.long(),
                         prob_sup_teacher.detach(),
-                        t_unsup_prob_mixed.detach(),
+                        t_unsup_mixed.detach(),
                         low_mask_all,
                         high_mask_all,
                         config,
@@ -560,9 +551,8 @@ with Engine(custom_parser=parser) as engine:
             dist.all_reduce(loss_sup, dist.ReduceOp.SUM)
             loss_sup = loss_sup / engine.world_size
 
-            ### Supervised loss For Teacher. No Backward ###
+            ### Supervised loss For Teacher. No Backward. Just for the record ###
             with torch.no_grad():
-                t_sup_pred_large = F.interpolate(t_sup_pred, size=gts.shape[1:], mode='bilinear', align_corners=True)
                 loss_sup_t = criterion(t_sup_pred_large, gts, t_aux_pred)
                 dist.all_reduce(loss_sup_t, dist.ReduceOp.SUM)
                 loss_sup_t = loss_sup_t / engine.world_size
@@ -585,6 +575,8 @@ with Engine(custom_parser=parser) as engine:
                 sum_csst += csst_loss.item()
                 if config.use_contrastive_learning:
                     sum_contra += contra_loss.item()
+                if config.consistency_acm or config.consistency_acp:
+                    global_confidence = [gc + cr for gc,cr in zip(global_confidence, class_criterion)]
 
             print_str = 'Epoch{}/{}'.format(epoch, config.nepochs) \
                         + ' Iter{}/{}:'.format(idx + 1, config.niters_per_epoch) \
@@ -598,8 +590,7 @@ with Engine(custom_parser=parser) as engine:
                 print_str = print_str + print_str_2
 
             if (config.consistency_acm or config.consistency_acp):
-                print_str_3 = f' sample_rate_target_class_conf {conf}' \
-                              + f' criterion_per_class {class_criterion}'
+                print_str_3 = f' confidence_per_class {[gc / global_index for gc in global_confidence]}'
                 print_str = print_str + print_str_3
 
             pbar.set_description(print_str, refresh=False)

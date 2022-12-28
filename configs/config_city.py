@@ -66,7 +66,7 @@ def get_config_city():
     C.bn_eps = 1e-5
     C.bn_momentum = 0.1
 
-    C.unsup_weight = .65
+    C.unsup_weight = 0.65
     C.ema_decay = 0.99
 
     """Cutmix Config"""
@@ -80,7 +80,7 @@ def get_config_city():
     C.drop_percent = 80
     C.start_unsupervised_training=1.
     C.unsup_contra_weight=.7
-    C.use_contrastive_learning=False
+    C.use_contrastive_learning=True
     C.negative_high_entropy=True
     C.low_rank=1
     C.high_rank=20
@@ -99,7 +99,7 @@ def get_config_city():
     C.number_cat = 3
     C.area_thresh = 0.03
     C.area_thresh2 = 0.03
-    C.criterion = dict(threshold=0.7, aux_loss_wght=0.4, cons=dict(sample=True, gamma=2),
+    C.criterion = dict(threshold=0.7, cons=dict(sample=True, gamma=2),
                         type='ohem', kwargs=dict(thresh=0.7, min_kept=100000))
     C.aux_loss = dict(aux_plane=1024, loss_weight=0.4, use_auxloss=True)
 
