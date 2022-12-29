@@ -9,7 +9,7 @@ export TARGET_DEVICE=$[$NGPUS-1]
 ###
 
 export volna="/home/kprokofi/datasets/datasets"
-export OUTPUT_PATH="/local/kprokofi/segmentation/output_city_4_AEL_U2PL"
+export OUTPUT_PATH="/local/kprokofi/segmentation/output_city_4_U2PL_rerun"
 export snapshot_dir=$OUTPUT_PATH/snapshot
 mkdir $OUTPUT_PATH
 
@@ -17,7 +17,7 @@ python -m torch.distributed.launch --nproc_per_node=$NGPUS --master_port 169711 
 python eval.py -e 10-40 -d 0-$TARGET_DEVICE --save_path $OUTPUT_PATH/results --dataset city_4 >> $OUTPUT_PATH/val.txt
 
 export volna="/home/kprokofi/datasets/datasets"
-export OUTPUT_PATH="/local/kprokofi/segmentation/output_city_AEL_U2PL"
+export OUTPUT_PATH="/local/kprokofi/segmentation/output_city_U2PL_rerun"
 export snapshot_dir=$OUTPUT_PATH/snapshot
 mkdir $OUTPUT_PATH
 
@@ -25,7 +25,7 @@ python -m torch.distributed.launch --nproc_per_node=$NGPUS --master_port 169711 
 python eval.py -e 10-40 -d 0-$TARGET_DEVICE --save_path $OUTPUT_PATH/results --dataset city >> $OUTPUT_PATH/val.txt
 
 export volna="/home/kprokofi/datasets/datasets"
-export OUTPUT_PATH="/local/kprokofi/segmentation/output_disk_AEL_U2PL"
+export OUTPUT_PATH="/local/kprokofi/segmentation/output_disk_U2PL_rerun"
 export snapshot_dir=$OUTPUT_PATH/snapshot
 mkdir $OUTPUT_PATH
 
@@ -33,7 +33,7 @@ python -m torch.distributed.launch --nproc_per_node=$NGPUS --master_port 169711 
 python eval.py -e 5-40 -d 0-$TARGET_DEVICE --save_path $OUTPUT_PATH/results --dataset disk >> $OUTPUT_PATH/val.txt
 
 export volna="/home/kprokofi/datasets/datasets"
-export OUTPUT_PATH="/local/kprokofi/segmentation/output_voc_person_AEL_U2PL"
+export OUTPUT_PATH="/local/kprokofi/segmentation/output_voc_person_U2PL_rerun"
 export snapshot_dir=$OUTPUT_PATH/snapshot
 mkdir $OUTPUT_PATH
 
@@ -41,7 +41,7 @@ python -m torch.distributed.launch --nproc_per_node=$NGPUS --master_port 169711 
 python eval.py -e 5-40 -d 0-$TARGET_DEVICE --save_path $OUTPUT_PATH/results --dataset voc_person >> $OUTPUT_PATH/val.txt
 
 export volna="/home/kprokofi/datasets"
-export OUTPUT_PATH="/local/kprokofi/segmentation/output_kvasir_AEL_U2PL"
+export OUTPUT_PATH="/local/kprokofi/segmentation/output_kvasir_U2PL_rerun"
 export snapshot_dir=$OUTPUT_PATH/snapshot
 mkdir $OUTPUT_PATH
 export learning_rate=0.0035
@@ -50,7 +50,7 @@ python -m torch.distributed.launch --nproc_per_node=$NGPUS --master_port 169711 
 python eval.py -e 5-40 -d 0-$TARGET_DEVICE --save_path $OUTPUT_PATH/results --dataset kvasir >> $OUTPUT_PATH/val.txt
 
 export volna="/home/kprokofi/datasets/datasets"
-export OUTPUT_PATH="/local/kprokofi/segmentation/output_fish_AEL_U2PL"
+export OUTPUT_PATH="/local/kprokofi/segmentation/output_fish_U2PL_rerun"
 export snapshot_dir=$OUTPUT_PATH/snapshot
 mkdir $OUTPUT_PATH
 

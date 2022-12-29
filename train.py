@@ -54,6 +54,30 @@ if os.getenv('debug') is not None:
 else:
     is_debug = False
 
+def set_random_seed(seed, deterministic=False, use_rank_shift=False, rank=0):
+    """Set random seed.
+
+    Args:
+        seed (int): Seed to be used.
+        deterministic (bool): Whether to set the deterministic option for
+            CUDNN backend, i.e., set `torch.backends.cudnn.deterministic`
+            to True and `torch.backends.cudnn.benchmark` to False.
+            Default: False.
+        rank_shift (bool): Whether to add rank number to the random seed to
+            have different random seed in different threads. Default: False.
+    """
+    if use_rank_shift:
+        seed += rank
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    if deterministic:
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
 def prepare_data(engine, dataset, config, collate_fn):
     train_loader_0, train_sampler = get_train_loader(engine, dataset, train_source=config.train_source, \
                                                    unsupervised=False, collate_fn=collate_fn, config=config)
@@ -124,15 +148,7 @@ with Engine(custom_parser=parser) as engine:
     else:
         raise
 
-    cudnn.benchmark = True
-
-    seed = config.seed
-    if engine.distributed:
-        seed = engine.local_rank
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
-
+    set_random_seed(config.seed, True, True,  engine.local_rank)
     # build class-wise memory bank
     memobank = []
     queue_ptrlis = []

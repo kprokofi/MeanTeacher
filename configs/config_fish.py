@@ -79,7 +79,7 @@ def get_config_fish():
 
     C.drop_percent = 80
     C.start_unsupervised_training=1.
-    C.unsup_contra_weight=.7
+    C.unsup_contra_weight=.65
     C.use_contrastive_learning=True
     C.negative_high_entropy=True
     C.low_rank=1
@@ -93,8 +93,8 @@ def get_config_fish():
     C.temperature=0.5
 
     '''Consistency'''
-    C.consistency_acp = True
-    C.consistency_acm = True
+    C.consistency_acp = False
+    C.consistency_acm = False
     C.ignore_cat = []
     C.number_cat = 1
     C.area_thresh = 0.03

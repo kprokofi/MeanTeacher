@@ -95,7 +95,7 @@ def get_config_kvasir():
     """Contrastive learning"""
     C.drop_percent = 80
     C.start_unsupervised_training=1.
-    C.unsup_contra_weight=1.
+    C.unsup_contra_weight=0.65
     C.use_contrastive_learning=True
     C.negative_high_entropy=True
     C.low_rank=1
