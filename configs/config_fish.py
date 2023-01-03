@@ -57,7 +57,7 @@ def get_config_fish():
 
 
     ''' Experiments Setting '''
-    C.labeled_ratio = 8  # ratio of labeled set
+    C.labeled_ratio = 16  # ratio of labeled set
     C.train_source = osp.join(C.dataset_path, "labled_{}.txt".format(C.labeled_ratio))
     C.unsup_source = osp.join(C.dataset_path, "unlabled_{}.txt".format(C.labeled_ratio))
     C.eval_source = osp.join(C.dataset_path)
@@ -80,7 +80,7 @@ def get_config_fish():
     C.drop_percent = 80
     C.start_unsupervised_training=1.
     C.unsup_contra_weight=.65
-    C.use_contrastive_learning=True
+    C.use_contrastive_learning=False
     C.negative_high_entropy=True
     C.low_rank=1
     C.high_rank=2
@@ -93,8 +93,8 @@ def get_config_fish():
     C.temperature=0.5
 
     '''Consistency'''
-    C.consistency_acp = False
-    C.consistency_acm = False
+    C.consistency_acp = True
+    C.consistency_acm = True
     C.ignore_cat = []
     C.number_cat = 1
     C.area_thresh = 0.03

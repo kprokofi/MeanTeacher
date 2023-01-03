@@ -77,6 +77,7 @@ def get_config_voc_person():
     """Contrastive learning"""
     C.drop_percent = 80
     C.start_unsupervised_training=1.
+    C.start_contrastive_training=1.
     C.unsup_contra_weight=.65
     C.use_contrastive_learning=True
     C.negative_high_entropy=True
@@ -129,7 +130,8 @@ def get_config_voc_person():
     C.warm_up_epoch = 0
 
     '''Consistency'''
-    C.consistency_acp = False
+    C.consistency_acp = True
+    C.compute_rce=False
     C.consistency_acm = False
     C.ignore_cat = []
     C.number_cat = 1

@@ -66,7 +66,7 @@ def get_config_kvasir():
     C.bn_eps = 1e-5
     C.bn_momentum = 0.1
 
-    C.unsup_weight = 1.
+    C.unsup_weight = .7
     C.ema_decay = 0.99
 
     """Cutmix Config"""
@@ -96,6 +96,7 @@ def get_config_kvasir():
     C.drop_percent = 80
     C.start_unsupervised_training=1.
     C.unsup_contra_weight=0.65
+    C.start_contrastive_training=1.
     C.use_contrastive_learning=True
     C.negative_high_entropy=True
     C.low_rank=1
@@ -109,7 +110,8 @@ def get_config_kvasir():
     C.temperature=0.5
 
     '''Consistency'''
-    C.consistency_acp = False
+    C.consistency_acp = True
+    C.compute_rce=False
     C.consistency_acm = False
     C.ignore_cat = []
     C.number_cat = 1

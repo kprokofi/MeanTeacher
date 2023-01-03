@@ -6,6 +6,26 @@ from torch.nn import functional as F
 import torch.distributed as dist
 
 
+def compute_rce_loss(predict, target):
+    from einops import rearrange
+
+    predict = F.softmax(predict, dim=1)
+
+    with torch.no_grad():
+        _, num_cls, h, w = predict.shape
+        temp_tar = target.clone()
+        temp_tar[target == 255] = 0
+
+        label = (
+            F.one_hot(temp_tar.clone().detach(), num_cls).float().cuda()
+        )  # (batch, h, w, num_cls)
+        label = rearrange(label, "b h w c -> b c h w")
+        label = torch.clamp(label, min=1e-4, max=1.0)
+
+    rce = -torch.sum(predict * torch.log(label), dim=1) * (target != 255).bool()
+    return rce.sum() / (target != 255).sum()
+
+
 @torch.no_grad()
 def gather_together(data):
     dist.barrier()

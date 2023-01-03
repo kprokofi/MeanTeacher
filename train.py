@@ -24,7 +24,7 @@ from dataloader_voc import VOC
 from dataloader import Dataset_uni, ValPre
 from network import Network
 from utils.init_func import init_weight, group_weight
-from utils.contrastive_loss import compute_contra_memobank_loss
+from utils.contrastive_loss import compute_contra_memobank_loss, compute_rce_loss
 from engine.lr_policy import WarmUpPolyLR
 from utils.pyt_utils import parse_devices
 from utils.ael_utils import dynamic_copy_paste, sample_from_bank, generate_cutmix_mask, update_cutmix_bank, cal_category_confidence, get_criterion
@@ -457,7 +457,22 @@ with Engine(custom_parser=parser) as engine:
                 if config.consistency_acm or config.consistency_acp:
                     loss_consistency1 = criterion_csst(s_sup_pred, t_logits_sup_pred_large, t_labels_sup_large, class_criterion) / engine.world_size
                     loss_consistency2 = criterion_csst(s_unsup_pred, t_unsup_logits_mixed, t_unsup_labels_mixed, class_criterion) / engine.world_size
+
+                    if config.compute_rce:
+                        loss_consistency1 += (
+                        0.1
+                        * compute_rce_loss(s_sup_pred, t_logits_sup_pred_large)
+                        / engine.world_size
+                        )
+
+                        loss_consistency2 += (
+                            0.1
+                            * compute_rce_loss(s_unsup_pred, t_unsup_logits_mixed)
+                            / engine.world_size
+                        )
+
                     csst_loss = (loss_consistency1 + loss_consistency2) * config.unsup_weight
+
                 else:
                     ### unsup loss ###
                     csst_loss = weight_unsup * criterion_csst(s_unsup_pred, t_unsup_labels_mixed)
@@ -470,7 +485,7 @@ with Engine(custom_parser=parser) as engine:
                         # perform momentum update
                         class_criterion = class_criterion * class_momentum + category_entropy * (1 - class_momentum)
 
-                if config.use_contrastive_learning:
+                if config.use_contrastive_learning and (epoch >= config.start_contrastive_training) :
                     prob_sup_teacher =  F.softmax(t_sup_pred, dim=1)
                     with torch.no_grad():
                         # get the representations from teacher rep head
@@ -589,7 +604,7 @@ with Engine(custom_parser=parser) as engine:
             sum_loss_sup_t += loss_sup_t.item()
             if epoch >= config.start_unsupervised_training:
                 sum_csst += csst_loss.item()
-                if config.use_contrastive_learning:
+                if config.use_contrastive_learning and (epoch >= config.start_contrastive_training):
                     sum_contra += contra_loss.item()
                 if config.consistency_acm or config.consistency_acp:
                     global_confidence = [gc + cr for gc,cr in zip(global_confidence, class_criterion)]
