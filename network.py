@@ -1,40 +1,35 @@
 # encoding: utf-8
 
-import random
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
+import torch.distributed as dist
 from functools import partial
-from collections import OrderedDict
+from einops import rearrange, repeat
+
 from base_model import resnet50
+from utils.proto_utils import distributed_sinkhorn, momentum_update, l2_normalize, ProjectionHead, trunc_normal_
 
 class Network(nn.Module):
     def __init__(self, num_classes, criterion, norm_layer, pretrained_model=None, config=None, start_update=1):
         super(Network, self).__init__()
         # student network
-        self.branch1 = SingleNetwork(num_classes, criterion, norm_layer, pretrained_model, config=config)
+        self.branch1 = SingleNetwork(num_classes, criterion, norm_layer, pretrained_model, config=config, use_prototypes=config.protoseg.use_prototypes)
         # teacher network
-        self.branch2 = SingleNetwork(num_classes, criterion, norm_layer, pretrained_model, config=config)
+        self.branch2 = SingleNetwork(num_classes, criterion, norm_layer, pretrained_model, config=config, use_prototypes=config.protoseg.use_prototypes, is_teacher=True)
         self.config = config
         self.start_update = start_update
         # detach the teacher model
         for param in self.branch2.parameters():
             param.detach_()
 
-    def forward(self, data, step=1, cur_iter=None, generate_pseudo=False,
-                    return_rep=False, no_upscale=False, return_aux=False, update=False):
+    def forward(self, data, step=1, cur_iter=None, no_upscale=False,
+                    update=False, gt_semantic_seg=None,
+                    pretrain_prototype=False):
 
         if not self.training:
-            pred1 = self.branch1(data, no_upscale, return_aux)
+            pred1 = self.branch1(data, no_upscale)
             return pred1
-
-        if generate_pseudo:
-            with torch.no_grad():
-                t_rep, t_out, _ = self.branch2(data, no_upscale, return_aux)
-            if return_rep:
-                return t_rep, t_out
-            return t_out
 
         # copy the parameters from teacher to student
         if cur_iter == self.start_update:
@@ -42,30 +37,20 @@ class Network(nn.Module):
                 t_param.data.copy_(s_param.data)
 
         if step == 1:
-            s_feature, s_out, pred_aux = self.branch1(data, no_upscale, return_aux)
+            s_out = self.branch1(data, no_upscale, gt_semantic_seg=gt_semantic_seg, pretrain_prototype=pretrain_prototype)
             if cur_iter >= self.start_update and update:
                 self._update_ema_variables(self.config.ema_decay, cur_iter)
-            if return_rep and not return_aux:
-                return s_feature, s_out
-            if return_rep and return_aux:
-                return s_feature, s_out, pred_aux
-            if return_aux:
-                return s_out, pred_aux
-
             return s_out
 
         if step == 2:
             with torch.no_grad():
-                t_feature, t_out, pred_aux = self.branch2(data, no_upscale, return_aux)
-                if return_rep and not return_aux:
-                    return t_feature, t_out
-                if return_rep and return_aux:
-                    return t_feature, t_out, pred_aux
-                if return_aux:
-                    return t_out, pred_aux
-                return t_out
+                t_out = self.branch2(data, no_upscale)
+            return t_out
 
     def _update_ema_variables(self, ema_decay, cur_step):
+        # for name, t_param in self.branch2.state_dict().items():
+        #     s_param = self.branch1.state_dict()[name]
+        #     t_param.data = t_param.data * ema_decay + (1 - ema_decay) * s_param.data
         for t_param, s_param in zip(self.branch2.parameters(), self.branch1.parameters()):
             t_param.data = t_param.data * ema_decay + (1 - ema_decay) * s_param.data
 
@@ -88,7 +73,7 @@ class Aux_Module(nn.Module):
 
 
 class SingleNetwork(nn.Module):
-    def __init__(self, num_classes, criterion, norm_layer, pretrained_model=None, config=None):
+    def __init__(self, num_classes, criterion, norm_layer, pretrained_model=None, config=None, use_prototypes=False, is_teacher=False):
         super(SingleNetwork, self).__init__()
         self.config = config
         self.backbone = resnet50(pretrained_model, norm_layer=norm_layer,
@@ -100,7 +85,38 @@ class SingleNetwork(nn.Module):
             m.apply(partial(self._nostride_dilate, dilate=self.dilate))
             self.dilate *= 2
 
+        self.use_prototype = use_prototypes
+        self.teacher = is_teacher
         # self.head = Head(num_classes, norm_layer, self.config.bn_momentum)
+        if self.use_prototype:
+            in_proto_channels = 512
+            #### PROTO init ####
+            self.gamma = config.protoseg['gamma']
+            self.num_prototype = config.protoseg['num_prototype']
+            self.pretrain_prototype = config.protoseg['pretrain_prototype']
+            self.num_classes = config.num_classes
+            self.prototypes = nn.Parameter(torch.zeros(self.num_classes, self.num_prototype, in_proto_channels),
+                                    requires_grad=False)
+            trunc_normal_(self.prototypes, std=0.02)
+            self.avg_pool = nn.AdaptiveAvgPool2d(256)
+            self.map_convs = nn.ModuleList([
+                    nn.Conv2d(256, 128, 1, bias=False),
+                    nn.Conv2d(512, 128, 1, bias=False),
+                    nn.Conv2d(1024, 128, 1, bias=False),
+                    nn.Conv2d(2048, 128, 1, bias=False)
+                ])
+            self.map_bn = norm_layer(256 * 4)
+            # self.proto_head = nn.Sequential(
+            #     nn.Conv2d(in_proto_channels, in_proto_channels, kernel_size=3, stride=1, padding=1),
+            #     norm_layer(in_proto_channels, momentum=self.config.bn_momentum),
+            #     nn.ReLU(inplace=True),
+            #     nn.Dropout2d(0.10)
+            # )
+
+            self.proj_head = ProjectionHead(in_proto_channels, in_proto_channels)
+            self.feat_norm = nn.LayerNorm(in_proto_channels)
+            self.mask_norm = nn.LayerNorm(self.num_classes)
+
         self.head = dec_deeplabv3_plus(num_classes, norm_layer, self.config.bn_momentum)
         self.business_layer = []
         self.business_layer.append(self.head)
@@ -114,31 +130,60 @@ class SingleNetwork(nn.Module):
         self.business_layer.append(self.classifier)
 
 
-    def forward(self, data, no_upscale=False, return_aux=False):
+    def forward(self, data, no_upscale=False, gt_semantic_seg=None, pretrain_prototype=False):
         h, w = data.shape[-1], data.shape[-2]
         blocks = self.backbone(data)
         x1,x2,x3,x4 = blocks
-        v3plus_feature = self.head(blocks)
+        _h, _w = x1.shape[-1], x1.shape[-2]
+        v3plus_feature = self.head(blocks) # main head
 
         if self.use_aux:
             # feat1 used as dsn loss as default, f1 is layer2's output as default
             pred_aux = self.auxor(x3)
             pred_aux = F.upsample(input=pred_aux, size=(h, w), mode='bilinear', align_corners=True)
+            v3plus_feature['aux'] = pred_aux
 
-        # v3plus_feature = self.head(blocks)
+        if self.use_prototype and not self.teacher:
+            ### protototype learning ###
+            # feat1 = self.map_convs[0](x1)
+            # feat2 = F.interpolate(self.map_convs[1](x2), size=(_h, _w), mode="bilinear", align_corners=True)
+            # feat3 = F.interpolate(self.map_convs[2](x3), size=(_h, _w), mode="bilinear", align_corners=True)
+            # feat4 = F.interpolate(self.map_convs[3](x4), size=(_h, _w), mode="bilinear", align_corners=True)
+            # feats = torch.cat([feat1, feat2, feat3, feat4], 1)
+            feats = v3plus_feature['aspp_out']
+            # c = self.proto_head(feats)
+            c = self.proj_head(feats)
+            _c = rearrange(c, 'b c h w -> (b h w) c')
+            _c = self.feat_norm(_c)
+            _c = l2_normalize(_c)
+            self.prototypes.data.copy_(l2_normalize(self.prototypes))
+
+            # n: h*w, k: num_class, m: num_prototype
+            masks = torch.einsum('nd,kmd->nmk', _c, self.prototypes)
+
+            out_seg = torch.amax(masks, dim=1)
+            out_seg = self.mask_norm(out_seg)
+            out_seg = rearrange(out_seg, "(b h w) k -> b k h w", b=feats.shape[0], h=feats.shape[2])
+
+            if not pretrain_prototype and gt_semantic_seg is not None:
+                gt_seg = F.interpolate(gt_semantic_seg.float(), size=feats.size()[2:], mode='nearest').view(-1)
+                contrast_logits, contrast_target = self.prototype_learning(_c, out_seg, gt_seg, masks)
+                v3plus_feature.update({'seg_out': out_seg, 'proto_logits': contrast_logits, 'proto_targets': contrast_target})
+
+            # else:
+            #     if not self.training:
+            #         return  F.interpolate(out_seg, size=(h, w), mode='bilinear', align_corners=True)
+
         # pred = self.classifier(v3plus_feature)
-        pred = v3plus_feature["pred"]
-        if "rep" in v3plus_feature:
-            rep = v3plus_feature["rep"]
-
         if not no_upscale:
-            pred = F.interpolate(pred, size=(h, w), mode='bilinear', align_corners=True)
+            v3plus_feature["pred"] = F.interpolate(v3plus_feature["pred"], size=(h, w), mode='bilinear', align_corners=True)
+            if self.use_prototype and not self.teacher and self.training:
+                v3plus_feature['seg_out'] = F.interpolate(v3plus_feature["seg_out"], size=(h, w), mode='bilinear', align_corners=True)
 
-        if return_aux and self.training:
-            return rep, pred, pred_aux
-        elif self.training:
-            return rep, pred, None
-        return pred
+        if self.training:
+            return v3plus_feature
+
+        return v3plus_feature["pred"]
 
     # @staticmethod
     def _nostride_dilate(self, m, dilate):
@@ -154,6 +199,59 @@ class SingleNetwork(nn.Module):
                     m.dilation = (dilate, dilate)
                     m.padding = (dilate, dilate)
 
+    def prototype_learning(self, _c, out_seg, gt_seg, masks):
+        pred_seg = torch.max(out_seg, 1)[1]
+        mask = (gt_seg == pred_seg.view(-1))
+
+        cosine_similarity = torch.mm(_c, self.prototypes.view(-1, self.prototypes.shape[-1]).t())
+
+        proto_logits = cosine_similarity
+        proto_target = gt_seg.clone().float()
+
+        # clustering for each class
+        protos = self.prototypes.data.clone()
+        for k in range(self.num_classes):
+            init_q = masks[..., k]
+            init_q = init_q[gt_seg == k, ...]
+            if init_q.shape[0] == 0:
+                continue
+
+            q, indexs = distributed_sinkhorn(init_q)
+
+            m_k = mask[gt_seg == k]
+
+            c_k = _c[gt_seg == k, ...]
+
+            m_k_tile = repeat(m_k, 'n -> n tile', tile=self.num_prototype)
+
+            m_q = q * m_k_tile  # n x self.num_prototype
+
+            c_k_tile = repeat(m_k, 'n -> n tile', tile=c_k.shape[-1])
+
+            c_q = c_k * c_k_tile  # n x embedding_dim
+
+            f = m_q.transpose(0, 1) @ c_q  # self.num_prototype x embedding_dim
+
+            n = torch.sum(m_q, dim=0)
+
+            if torch.sum(n) > 0:
+                f = F.normalize(f, p=2, dim=-1)
+
+                new_value = momentum_update(old_value=protos[k, n != 0, :], new_value=f[n != 0, :],
+                                            momentum=self.gamma, debug=False)
+                protos[k, n != 0, :] = new_value
+
+            proto_target[gt_seg == k] = indexs.float() + (self.num_prototype * k)
+
+        self.prototypes = nn.Parameter(l2_normalize(protos),
+                                       requires_grad=False)
+
+        if dist.is_available() and dist.is_initialized():
+            protos = self.prototypes.data.clone()
+            dist.all_reduce(protos.div_(dist.get_world_size()))
+            self.prototypes = nn.Parameter(protos, requires_grad=False)
+
+        return proto_logits, proto_target
 
 class ASPP(nn.Module):
     def __init__(self,
@@ -175,6 +273,7 @@ class ASPP(nn.Module):
             nn.Conv2d(in_channels, hidden_channels, 3, bias=False, dilation=dilation_rates[2],
                       padding=dilation_rates[2])
         ])
+
         self.map_bn = norm_act(hidden_channels * 4)
 
         self.global_pooling_conv = nn.Conv2d(in_channels, hidden_channels, 1, bias=False)
@@ -369,7 +468,9 @@ class dec_deeplabv3_plus(nn.Module):
         self.rep_head = rep_head
 
         self.low_conv = nn.Sequential(
-            nn.Conv2d(256, 256, kernel_size=1), norm_layer(256, momentum=bn_momentum), nn.ReLU(inplace=True)
+            nn.Conv2d(256, 256, kernel_size=1),
+            norm_layer(256, momentum=bn_momentum),
+            nn.ReLU(inplace=True)
         )
 
         self.aspp = ASPP2(
@@ -416,6 +517,7 @@ class dec_deeplabv3_plus(nn.Module):
         aspp_out = torch.cat((low_feat, aspp_out), dim=1)
         aspp_out = self.pre_classifier(aspp_out)
         res = {"pred": self.classifier(aspp_out)}
+        res["aspp_out"] = aspp_out
         res["rep"] = self.rep_classifier(aspp_out)
 
         return res

@@ -1,10 +1,8 @@
 from __future__ import division
-import os.path as osp
 import os
 import sys
 import time
 import argparse
-import math
 from tqdm import tqdm
 import random
 
@@ -12,7 +10,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributed as dist
-import torch.backends.cudnn as cudnn
 import numpy as np
 
 from configs import get_config_voc, get_config_city, get_config_fish, get_config_water, get_config_disk, get_config_kvasir, get_config_city_4, get_config_voc_person
@@ -21,7 +18,7 @@ from dataloader_city import get_train_loader_city
 from dataloader_voc import get_train_loader_voc
 from dataloader_city import CityScape
 from dataloader_voc import VOC
-from dataloader import Dataset_uni, ValPre
+from dataloader import Dataset_uni
 from network import Network
 from utils.init_func import init_weight, group_weight
 from utils.contrastive_loss import compute_contra_memobank_loss, compute_rce_loss
@@ -29,8 +26,7 @@ from engine.lr_policy import WarmUpPolyLR
 from utils.pyt_utils import parse_devices
 from utils.ael_utils import dynamic_copy_paste, sample_from_bank, generate_cutmix_mask, update_cutmix_bank, cal_category_confidence, get_criterion
 from engine.engine import Engine
-from seg_opr.loss_opr import SigmoidFocalLoss, ProbOhemCrossEntropy2d
-from eval import SegEvaluator
+from utils.proto_loss import PixelPrototypeCELoss
 # from seg_opr.sync_bn import DataParallelModel, Reduce, BatchNorm2d
 import mask_gen
 from custom_collate import SegCollate
@@ -211,6 +207,7 @@ with Engine(custom_parser=parser) as engine:
     else:
         criterion_csst = torch.nn.CrossEntropyLoss(ignore_index=255)
 
+    proto_loss = PixelPrototypeCELoss(config)
 
     if engine.distributed:
         BatchNorm2d = SyncBatchNorm
@@ -274,6 +271,7 @@ with Engine(custom_parser=parser) as engine:
 
     sum_loss_sup = 0
     sum_loss_sup_t = 0
+    sum_loss_proto_sup = 0
     sum_csst = 0
     sum_contra = 0
     global_index = 0
@@ -349,10 +347,12 @@ with Engine(custom_parser=parser) as engine:
                 del paste_imgs, paste_gts
 
             ### Supervised inference ###
-            s_rep_sup, s_sup_pred, aux_pred = model(labeled_imgs, step=1, cur_iter=epoch, return_rep=True, return_aux=True, update=True)
+            student_sup_out = model(labeled_imgs, step=1, cur_iter=epoch, update=True, gt_semantic_seg=gts.unsqueeze(1))
+            s_rep_sup, s_sup_pred, aux_pred = student_sup_out['rep'], student_sup_out['pred'], student_sup_out['aux']
 
             with torch.no_grad():
-                t_rep_sup, t_sup_pred, t_aux_pred = model(labeled_imgs, step=2, return_rep=True, no_upscale=True, return_aux=True)
+                out = model(labeled_imgs, step=2, no_upscale=True)
+                t_rep_sup, t_sup_pred, t_aux_pred = out['rep'], out['pred'], out['aux']
                 t_sup_pred_large = F.interpolate(t_sup_pred, size=gts.shape[1:], mode='bilinear', align_corners=True)
                 t_conf_sup_pred_large = F.softmax(t_sup_pred_large, dim=1)
                 t_logits_sup_pred_large, t_labels_sup_large = torch.max(t_conf_sup_pred_large, dim=1)
@@ -364,15 +364,16 @@ with Engine(custom_parser=parser) as engine:
                 drop_percent = 100 - percent_unreliable
                 batch_size, num_class, h, w = t_sup_pred_large.shape
 
-                entropy = -torch.sum(t_conf_sup_pred_large * torch.log(t_conf_sup_pred_large + 1e-10), dim=1)
+                if config.consistency_acm or config.consistency_acp:
+                    entropy = -torch.sum(t_conf_sup_pred_large * torch.log(t_conf_sup_pred_large + 1e-10), dim=1)
 
-                thresh = np.percentile(
-                    entropy[t_labels_sup_large != 255].detach().cpu().numpy().flatten(), drop_percent
-                )
-                thresh_mask = entropy.ge(thresh).bool() * (t_labels_sup_large != 255).bool()
+                    thresh = np.percentile(
+                        entropy[t_labels_sup_large != 255].detach().cpu().numpy().flatten(), drop_percent
+                    )
+                    thresh_mask = entropy.ge(thresh).bool() * (t_labels_sup_large != 255).bool()
 
-                t_labels_sup_large[thresh_mask] = 255
-                weight_sup = batch_size * h * w / torch.sum(t_labels_sup_large != 255)
+                    t_labels_sup_large[thresh_mask] = 255
+                    weight_sup = batch_size * h * w / torch.sum(t_labels_sup_large != 255)
 
             ### Unsupervised inference ###
             if epoch >= config.start_unsupervised_training:
@@ -398,8 +399,8 @@ with Engine(custom_parser=parser) as engine:
                     image_unsup2 = torch.cat(image_unsup2)
                     image_unsup2 = image_unsup2.cuda()
                     # forward on this data
-                    t_preds_unsup_1_large = model(image_unsup, step=2)
-                    t_preds_unsup_2_large = model(image_unsup2, step=2)
+                    t_preds_unsup_1_large = model(image_unsup, step=2)['pred']
+                    t_preds_unsup_2_large = model(image_unsup2, step=2)['pred']
 
                     labels_teacher_unsup_target_cat = torch.max(t_preds_unsup_2_large, dim=1)[1].cpu().numpy()
                     # generate cutmix mask relying on the $preds_teacher_unsup$
@@ -422,8 +423,8 @@ with Engine(custom_parser=parser) as engine:
                 else:
                     with torch.no_grad():
                         # unsupervised cutmix inference
-                        t_unsup_pred_0_large = model(unsup_imgs_0, step=2, return_rep=False)
-                        t_unsup_pred_1_large = model(unsup_imgs_1, step=2, return_rep=False)
+                        t_unsup_pred_0_large = model(unsup_imgs_0, step=2)['pred']
+                        t_unsup_pred_1_large = model(unsup_imgs_1, step=2)['pred']
 
                     # unsupervised loss on model/branch#1
                     batch_mix_masks = mask_params
@@ -435,8 +436,8 @@ with Engine(custom_parser=parser) as engine:
                     t_unsup_labels_mixed = t_unsup_labels_mixed.long()
 
                 # unsupervised student cutmix inference
-                s_rep_unsup, s_unsup_pred = model(unsup_imgs_mixed, step=1, cur_iter=epoch, return_rep=True, update=False)
-
+                out_unsup_s = model(unsup_imgs_mixed, step=1, cur_iter=epoch, update=False, gt_semantic_seg=t_unsup_labels_mixed.unsqueeze(1))
+                s_rep_unsup, s_unsup_pred = out_unsup_s['rep'], out_unsup_s['pred']
                 s_pred_all = torch.cat([s_sup_pred, s_unsup_pred])
                 s_rep_all = torch.cat([s_rep_sup, s_rep_unsup])
 
@@ -464,22 +465,23 @@ with Engine(custom_parser=parser) as engine:
                     if config.compute_rce:
                         loss_consistency1 += (
                         0.1
-                        * compute_rce_loss(s_sup_pred, t_logits_sup_pred_large)
+                        * compute_rce_loss(s_sup_pred, t_labels_sup_large)
                         / engine.world_size
                         )
 
                         loss_consistency2 += (
                             0.1
-                            * compute_rce_loss(s_unsup_pred, t_unsup_logits_mixed)
+                            * compute_rce_loss(s_unsup_pred, t_unsup_labels_mixed)
                             / engine.world_size
                         )
 
                     csst_loss = (loss_consistency1 + loss_consistency2) * config.unsup_weight
 
                 else:
-                    ### unsup loss ###
-                    loss_consistency1 = criterion_csst(s_unsup_pred, t_unsup_labels_mixed) / engine.world_size
-                    loss_consistency2 = criterion_csst(s_sup_pred, t_labels_sup_large) / engine.world_size
+                    ### unsup CE loss ###
+                    loss_consistency1 = weight_unsup * criterion_csst(s_unsup_pred, t_unsup_labels_mixed) / engine.world_size
+                    ### proto unsup loss ###
+                    loss_consistency2 = weight_unsup * proto_loss(out_unsup_s, t_unsup_labels_mixed) / engine.world_size
                     csst_loss = (loss_consistency1 + loss_consistency2) * config.unsup_weight
                     # csst_loss = weight_unsup * criterion_csst(s_unsup_pred, t_unsup_labels_mixed)
 
@@ -495,7 +497,8 @@ with Engine(custom_parser=parser) as engine:
                     prob_sup_teacher =  F.softmax(t_sup_pred, dim=1)
                     with torch.no_grad():
                         # get the representations from teacher rep head
-                        t_rep_unsup, t_unsup_mixed = model(unsup_imgs_mixed, step=2, return_rep=True, no_upscale=True)
+                        out_unsup_t = model(unsup_imgs_mixed, step=2, no_upscale=True)
+                        t_rep_unsup, t_unsup_mixed = out_unsup_t['rep'], out_unsup_t['pred']
                     t_rep_all = torch.cat([t_rep_sup, t_rep_unsup])
 
                     ### Contrastive loss ###
@@ -583,10 +586,18 @@ with Engine(custom_parser=parser) as engine:
                 csst_loss = 0 * s_rep_sup.sum()
                 contra_loss = 0 * s_rep_sup.sum()
 
-            ### Supervised loss For Student ###
+            ### Supervised linear loss For Student ###
             loss_sup = criterion(s_sup_pred, gts, aux_pred)
             dist.all_reduce(loss_sup, dist.ReduceOp.SUM)
             loss_sup = loss_sup / engine.world_size
+
+            ### Proto supervised loss ###
+            if config.protoseg.use_prototypes:
+                loss_proto_sup = proto_loss(student_sup_out, gts)
+                dist.all_reduce(loss_proto_sup, dist.ReduceOp.SUM)
+                loss_proto_sup = loss_proto_sup / engine.world_size
+            else:
+                 loss_proto_sup =  0
 
             ### Supervised loss For Teacher. No Backward. Just for the record ###
             with torch.no_grad():
@@ -602,12 +613,15 @@ with Engine(custom_parser=parser) as engine:
             for i in range(2, len(optimizer_l.param_groups)):
                 optimizer_l.param_groups[i]['lr'] = lr
 
-            loss = loss_sup + csst_loss + contra_loss
+            loss = loss_proto_sup + loss_sup + csst_loss + contra_loss
             loss.backward()
             optimizer_l.step()      # only the student model need to be updated by SGD.
 
             sum_loss_sup += loss_sup.item()
             sum_loss_sup_t += loss_sup_t.item()
+            if config.protoseg.use_prototypes:
+                sum_loss_proto_sup += loss_proto_sup.item()
+
             if epoch >= config.start_unsupervised_training:
                 sum_csst += csst_loss.item()
                 if config.use_contrastive_learning and (epoch >= config.start_contrastive_training):
@@ -619,16 +633,20 @@ with Engine(custom_parser=parser) as engine:
                         + ' Iter{}/{}:'.format(idx + 1, config.niters_per_epoch) \
                         + ' lr=%.2e' % lr \
                         + ' loss_sup=%.2f' % (sum_loss_sup / global_index) \
-                        + ' loss_sup_t=%.2f' % (sum_loss_sup_t / global_index)
+                        + ' loss_proto_sup=%.2f' % (sum_loss_proto_sup / global_index) \
+                        + ' loss_sup_t=%.2f' % (sum_loss_sup_t / global_index) \
 
             if (epoch >= config.start_unsupervised_training):
-                print_str_2 = ' loss_csst=%.4f' % (sum_csst / global_index) \
-                                + ' loss_contra=%.4f' % (sum_contra / global_index)
+                print_str_2 = ' loss_csst=%.4f' % (sum_csst / global_index)
                 print_str = print_str + print_str_2
 
-            if (config.consistency_acm or config.consistency_acp):
-                print_str_3 = f' confidence_per_class {[gc / global_index for gc in global_confidence]}'
-                print_str = print_str + print_str_3
+                if config.use_contrastive_learning:
+                    print_str_4 = ' loss_contra=%.4f' % (sum_contra / global_index)
+                    print_str = print_str + print_str_4
+
+                if (config.consistency_acm or config.consistency_acp):
+                    print_str_3 = f' confidence_per_class {[gc / global_index for gc in global_confidence]}'
+                    print_str = print_str + print_str_3
 
             pbar.set_description(print_str, refresh=False)
 
@@ -637,6 +655,7 @@ with Engine(custom_parser=parser) as engine:
 
         if engine.distributed and (engine.local_rank == 0):
             logger.add_scalar('train_loss_sup', sum_loss_sup / len(pbar), epoch)
+            logger.add_scalar('loss_proto_sup', sum_loss_proto_sup / len(pbar), epoch)
             logger.add_scalar('train_loss_sup_t', sum_loss_sup_t / len(pbar), epoch)
             logger.add_scalar('train_loss_csst', sum_csst / len(pbar), epoch)
             logger.add_scalar('train_loss_contrast', sum_contra / len(pbar), epoch)

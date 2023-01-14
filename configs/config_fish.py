@@ -57,7 +57,7 @@ def get_config_fish():
 
 
     ''' Experiments Setting '''
-    C.labeled_ratio = 16  # ratio of labeled set
+    C.labeled_ratio = 8  # ratio of labeled set
     C.train_source = osp.join(C.dataset_path, "labled_{}.txt".format(C.labeled_ratio))
     C.unsup_source = osp.join(C.dataset_path, "unlabled_{}.txt".format(C.labeled_ratio))
     C.eval_source = osp.join(C.dataset_path)
@@ -78,8 +78,8 @@ def get_config_fish():
     C.cutmix_boxmask_no_invert = False
 
     C.drop_percent = 80
-    C.start_unsupervised_training=1
-    C.start_contrastive_training=5
+    C.start_unsupervised_training=1.
+    C.start_contrastive_training=10.
     C.unsup_contra_weight=.65
     C.use_contrastive_learning=False
     C.negative_high_entropy=True
@@ -94,7 +94,7 @@ def get_config_fish():
     C.temperature=0.5
 
     '''Consistency'''
-    C.consistency_acp = True
+    C.consistency_acp = False
     C.consistency_acm = False
     C.compute_rce=False
     C.ignore_cat = []
@@ -104,6 +104,30 @@ def get_config_fish():
     C.criterion = dict(threshold=0.7, cons=dict(sample=True, gamma=2),
                         type='ohem', kwargs=dict(thresh=0.7, min_kept=100000))
     C.aux_loss = dict(aux_plane=1024, loss_weight=0.4, use_auxloss=True)
+
+    C.protoseg = {
+      "gamma": 0.999,
+      "loss_ppc_weight": 0.01,
+      "loss_ppd_weight": 0.001,
+      "num_prototype": 4,
+      "pretrain_prototype": False,
+      "use_rmi": False,
+      "use_prototypes": True,
+      "update_prototype": True,
+      "warmup_iters": 0
+    }
+
+    C.rmi_params = {
+        "num_classes": 19,
+        "rmi_radius": 3,
+        "rmi_pool_way": 0,
+        "rmi_pool_size": 3,
+        "rmi_pool_stride": 3,
+        "loss_weight_lambda": 0.5,
+        "loss_weight": 1.0,
+        "lambda_way": 1,
+        "use_sigmoid": False
+      }
 
     ''' Image Config '''
     C.num_classes = 2
