@@ -55,7 +55,6 @@ def get_config_city_4():
     C.gt_root_folder = C.dataset_path
     C.pretrained_model = '/home/kprokofi/TorchSemiSeg/DATA/pytorch-weight/resnet50_v1c.pth'
 
-
     ''' Experiments Setting '''
     C.labeled_ratio = 16   # ratio of labeled set
     C.train_source = osp.join(C.dataset_path, "labled_{}.txt".format(C.labeled_ratio))
@@ -71,7 +70,8 @@ def get_config_city_4():
 
     '''Contrastive loss'''
     C.drop_percent = 80
-    C.start_unsupervised_training=1.
+    C.start_unsupervised_training=1
+    C.start_contrastive_training=5
     C.unsup_contra_weight=.65
     C.use_contrastive_learning=False
     C.negative_high_entropy=True
@@ -87,7 +87,8 @@ def get_config_city_4():
 
     '''Consistency'''
     C.consistency_acp = True
-    C.consistency_acm = True
+    C.consistency_acm = False
+    C.compute_rce=False
     C.ignore_cat = []
     C.number_cat = 2
     C.area_thresh = 0.03

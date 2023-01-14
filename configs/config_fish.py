@@ -78,7 +78,8 @@ def get_config_fish():
     C.cutmix_boxmask_no_invert = False
 
     C.drop_percent = 80
-    C.start_unsupervised_training=1.
+    C.start_unsupervised_training=1
+    C.start_contrastive_training=5
     C.unsup_contra_weight=.65
     C.use_contrastive_learning=False
     C.negative_high_entropy=True
@@ -94,7 +95,8 @@ def get_config_fish():
 
     '''Consistency'''
     C.consistency_acp = True
-    C.consistency_acm = True
+    C.consistency_acm = False
+    C.compute_rce=False
     C.ignore_cat = []
     C.number_cat = 1
     C.area_thresh = 0.03

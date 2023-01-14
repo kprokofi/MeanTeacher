@@ -57,7 +57,7 @@ def get_config_disk():
 
 
     ''' Experiments Setting '''
-    C.labeled_ratio = 8     # ratio of labeled set
+    C.labeled_ratio = 16     # ratio of labeled set
     C.train_source = osp.join(C.dataset_path, "labled_{}.txt".format(C.labeled_ratio))
     C.unsup_source = osp.join(C.dataset_path, "unlabled_{}.txt".format(C.labeled_ratio))
     C.eval_source = osp.join(C.dataset_path)
@@ -66,7 +66,7 @@ def get_config_disk():
     C.bn_eps = 1e-5
     C.bn_momentum = 0.1
 
-    C.unsup_weight = 0.7
+    C.unsup_weight = .7
     C.ema_decay = 0.99
 
     """Cutmix Config"""
@@ -79,11 +79,10 @@ def get_config_disk():
 
     """Contrastive learning"""
     C.drop_percent = 80
-    C.start_unsupervised_training=1.
-    C.start_contrastive_training=1.
+    C.start_unsupervised_training=1
+    C.start_contrastive_training=5
     C.unsup_contra_weight=.65
-    C.use_contrastive_learning=True
-    C.compute_rce=False
+    C.use_contrastive_learning=False
     C.negative_high_entropy=True
     C.low_rank=1
     C.high_rank=2
@@ -98,6 +97,7 @@ def get_config_disk():
     '''Consistency'''
     C.consistency_acp = True
     C.consistency_acm = False
+    C.compute_rce=False
     C.ignore_cat = []
     C.number_cat = 1
     C.area_thresh = 0.03

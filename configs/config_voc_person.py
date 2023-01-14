@@ -54,7 +54,7 @@ def get_config_voc_person():
     C.pretrained_model = '/home/kprokofi/TorchSemiSeg/DATA/pytorch-weight/resnet50_v1c.pth'
 
     ''' Experiments Setting '''
-    C.labeled_ratio = 8     # ratio of labeled set
+    C.labeled_ratio = 16     # ratio of labeled set
     C.train_source = osp.join(C.dataset_path, "labled_{}.txt".format(C.labeled_ratio))
     C.unsup_source = osp.join(C.dataset_path, "unlabled_{}.txt".format(C.labeled_ratio))
     C.eval_source = osp.join(C.dataset_path)
@@ -76,10 +76,10 @@ def get_config_voc_person():
 
     """Contrastive learning"""
     C.drop_percent = 80
-    C.start_unsupervised_training=1.
-    C.start_contrastive_training=1.
+    C.start_unsupervised_training=1
+    C.start_contrastive_training=5
     C.unsup_contra_weight=.65
-    C.use_contrastive_learning=True
+    C.use_contrastive_learning=False
     C.negative_high_entropy=True
     C.low_rank=1
     C.high_rank=2

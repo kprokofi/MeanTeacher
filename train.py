@@ -211,6 +211,7 @@ with Engine(custom_parser=parser) as engine:
     else:
         criterion_csst = torch.nn.CrossEntropyLoss(ignore_index=255)
 
+
     if engine.distributed:
         BatchNorm2d = SyncBatchNorm
 
@@ -455,8 +456,10 @@ with Engine(custom_parser=parser) as engine:
                     weight_unsup = batch_size * h * w / torch.sum(t_unsup_labels_mixed != 255)
 
                 if config.consistency_acm or config.consistency_acp:
-                    loss_consistency1 = criterion_csst(s_sup_pred, t_logits_sup_pred_large, t_labels_sup_large, class_criterion) / engine.world_size
-                    loss_consistency2 = criterion_csst(s_unsup_pred, t_unsup_logits_mixed, t_unsup_labels_mixed, class_criterion) / engine.world_size
+                    loss_consistency1 = weight_unsup * criterion_csst(s_sup_pred, t_logits_sup_pred_large, t_labels_sup_large, class_criterion) / engine.world_size
+                    loss_consistency2 = weight_sup * criterion_csst(s_unsup_pred, t_unsup_logits_mixed, t_unsup_labels_mixed, class_criterion) / engine.world_size
+                    # loss_consistency1 = weight_unsup * criterion_csst(s_unsup_pred, t_unsup_labels_mixed) / engine.world_size
+                    # loss_consistency2 = weight_sup * criterion_csst(s_sup_pred, t_labels_sup_large) / engine.world_size
 
                     if config.compute_rce:
                         loss_consistency1 += (
@@ -475,7 +478,10 @@ with Engine(custom_parser=parser) as engine:
 
                 else:
                     ### unsup loss ###
-                    csst_loss = weight_unsup * criterion_csst(s_unsup_pred, t_unsup_labels_mixed)
+                    loss_consistency1 = criterion_csst(s_unsup_pred, t_unsup_labels_mixed) / engine.world_size
+                    loss_consistency2 = criterion_csst(s_sup_pred, t_labels_sup_large) / engine.world_size
+                    csst_loss = (loss_consistency1 + loss_consistency2) * config.unsup_weight
+                    # csst_loss = weight_unsup * criterion_csst(s_unsup_pred, t_unsup_labels_mixed)
 
                 dist.all_reduce(csst_loss, dist.ReduceOp.SUM)
 
