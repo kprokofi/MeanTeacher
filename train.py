@@ -481,7 +481,7 @@ with Engine(custom_parser=parser) as engine:
                     ### unsup CE loss ###
                     loss_consistency1 = weight_unsup * criterion_csst(s_unsup_pred, t_unsup_labels_mixed) / engine.world_size
                     ### proto unsup loss ###
-                    loss_consistency2 = weight_unsup * proto_loss(out_unsup_s, t_unsup_labels_mixed) / engine.world_size
+                    loss_consistency2 = weight_unsup * proto_loss(out_unsup_s, t_unsup_labels_mixed) * config.proto_weight / engine.world_size
                     csst_loss = (loss_consistency1 + loss_consistency2) * config.unsup_weight
                     # csst_loss = weight_unsup * criterion_csst(s_unsup_pred, t_unsup_labels_mixed)
 
@@ -593,7 +593,7 @@ with Engine(custom_parser=parser) as engine:
 
             ### Proto supervised loss ###
             if config.protoseg.use_prototypes:
-                loss_proto_sup = proto_loss(student_sup_out, gts)
+                loss_proto_sup = proto_loss(student_sup_out, gts) * config.proto_weight
                 dist.all_reduce(loss_proto_sup, dist.ReduceOp.SUM)
                 loss_proto_sup = loss_proto_sup / engine.world_size
             else:

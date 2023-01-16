@@ -106,12 +106,12 @@ class SingleNetwork(nn.Module):
                     nn.Conv2d(2048, 128, 1, bias=False)
                 ])
             self.map_bn = norm_layer(256 * 4)
-            # self.proto_head = nn.Sequential(
-            #     nn.Conv2d(in_proto_channels, in_proto_channels, kernel_size=3, stride=1, padding=1),
-            #     norm_layer(in_proto_channels, momentum=self.config.bn_momentum),
-            #     nn.ReLU(inplace=True),
-            #     nn.Dropout2d(0.10)
-            # )
+            self.proto_head = nn.Sequential(
+                nn.Conv2d(in_proto_channels, in_proto_channels, kernel_size=3, stride=1, padding=1),
+                norm_layer(in_proto_channels, momentum=self.config.bn_momentum),
+                nn.ReLU(inplace=True),
+                nn.Dropout2d(0.10)
+            )
 
             self.proj_head = ProjectionHead(in_proto_channels, in_proto_channels)
             self.feat_norm = nn.LayerNorm(in_proto_channels)
@@ -151,7 +151,7 @@ class SingleNetwork(nn.Module):
             # feat4 = F.interpolate(self.map_convs[3](x4), size=(_h, _w), mode="bilinear", align_corners=True)
             # feats = torch.cat([feat1, feat2, feat3, feat4], 1)
             feats = v3plus_feature['aspp_out']
-            # c = self.proto_head(feats)
+            c = self.proto_head(feats)
             c = self.proj_head(feats)
             _c = rearrange(c, 'b c h w -> (b h w) c')
             _c = self.feat_norm(_c)
@@ -515,10 +515,10 @@ class dec_deeplabv3_plus(nn.Module):
         )
 
         aspp_out = torch.cat((low_feat, aspp_out), dim=1)
-        aspp_out = self.pre_classifier(aspp_out)
-        res = {"pred": self.classifier(aspp_out)}
+        aspp_pre_out = self.pre_classifier(aspp_out)
+        res = {"pred": self.classifier(aspp_pre_out)}
         res["aspp_out"] = aspp_out
-        res["rep"] = self.rep_classifier(aspp_out)
+        res["rep"] = self.rep_classifier(aspp_pre_out)
 
         return res
 
