@@ -25,11 +25,15 @@ class Network(nn.Module):
 
     def forward(self, data, step=1, cur_iter=None, no_upscale=False,
                     update=False, gt_semantic_seg=None,
-                    pretrain_prototype=False):
+                    pretrain_prototype=False, init_prototypes=False):
 
         if not self.training:
             pred1 = self.branch1(data, no_upscale)
             return pred1
+
+        if init_prototypes:
+            feats = self.branch1(data, no_upscale, init_prototypes=init_prototypes)
+            return feats
 
         # copy the parameters from teacher to student
         if cur_iter == self.start_update:
@@ -87,6 +91,7 @@ class SingleNetwork(nn.Module):
 
         self.use_prototype = use_prototypes
         self.teacher = is_teacher
+        self.forward_proto = False
         # self.head = Head(num_classes, norm_layer, self.config.bn_momentum)
         if self.use_prototype:
             in_proto_channels = 512
@@ -99,13 +104,12 @@ class SingleNetwork(nn.Module):
                                     requires_grad=False)
             trunc_normal_(self.prototypes, std=0.02)
             self.avg_pool = nn.AdaptiveAvgPool2d(256)
-            self.map_convs = nn.ModuleList([
-                    nn.Conv2d(256, 128, 1, bias=False),
-                    nn.Conv2d(512, 128, 1, bias=False),
-                    nn.Conv2d(1024, 128, 1, bias=False),
-                    nn.Conv2d(2048, 128, 1, bias=False)
-                ])
-            self.map_bn = norm_layer(256 * 4)
+            # self.map_convs = nn.ModuleList([
+            #         nn.Conv2d(256, 128, 1, bias=False),
+            #         nn.Conv2d(512, 128, 1, bias=False),
+            #         nn.Conv2d(1024, 128, 1, bias=False),
+            #         nn.Conv2d(2048, 128, 1, bias=False)
+            #     ])
             self.proto_head = nn.Sequential(
                 nn.Conv2d(in_proto_channels, in_proto_channels, kernel_size=3, stride=1, padding=1),
                 norm_layer(in_proto_channels, momentum=self.config.bn_momentum),
@@ -130,12 +134,15 @@ class SingleNetwork(nn.Module):
         self.business_layer.append(self.classifier)
 
 
-    def forward(self, data, no_upscale=False, gt_semantic_seg=None, pretrain_prototype=False):
+    def forward(self, data, no_upscale=False, gt_semantic_seg=None, pretrain_prototype=False, init_prototypes=False):
         h, w = data.shape[-1], data.shape[-2]
         blocks = self.backbone(data)
         x1,x2,x3,x4 = blocks
         _h, _w = x1.shape[-1], x1.shape[-2]
         v3plus_feature = self.head(blocks) # main head
+
+        if init_prototypes:
+            return v3plus_feature["features"]
 
         if self.use_aux:
             # feat1 used as dsn loss as default, f1 is layer2's output as default
@@ -151,7 +158,7 @@ class SingleNetwork(nn.Module):
             # feat4 = F.interpolate(self.map_convs[3](x4), size=(_h, _w), mode="bilinear", align_corners=True)
             # feats = torch.cat([feat1, feat2, feat3, feat4], 1)
             feats = v3plus_feature['aspp_out']
-            c = self.proto_head(feats)
+            # c = self.proto_head(feats)
             c = self.proj_head(feats)
             _c = rearrange(c, 'b c h w -> (b h w) c')
             _c = self.feat_norm(_c)
@@ -198,6 +205,7 @@ class SingleNetwork(nn.Module):
                 if m.kernel_size == (3, 3):
                     m.dilation = (dilate, dilate)
                     m.padding = (dilate, dilate)
+
 
     def prototype_learning(self, _c, out_seg, gt_seg, masks):
         pred_seg = torch.max(out_seg, 1)[1]
@@ -518,6 +526,7 @@ class dec_deeplabv3_plus(nn.Module):
         aspp_pre_out = self.pre_classifier(aspp_out)
         res = {"pred": self.classifier(aspp_pre_out)}
         res["aspp_out"] = aspp_out
+        res["features"] = aspp_out
         res["rep"] = self.rep_classifier(aspp_pre_out)
 
         return res

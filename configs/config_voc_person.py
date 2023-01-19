@@ -64,6 +64,7 @@ def get_config_voc_person():
     C.bn_momentum = 0.1
 
     C.unsup_weight = 1.
+    C.proto_weight = 1.
     C.ema_decay = 0.99
 
     """Cutmix Config"""
@@ -120,6 +121,7 @@ def get_config_voc_person():
     C.lr_power = 0.9
     C.momentum = 0.9
     C.weight_decay = 1e-4
+    C.start_proto_training = 5
 
     C.nepochs = 40
     C.max_samples = max(C.num_train_imgs, C.num_unsup_imgs)     # Define the iterations in an epoch

@@ -67,6 +67,8 @@ def get_config_fish():
     C.bn_momentum = 0.1
 
     C.unsup_weight = 1.0
+    C.proto_weight = 1.
+    C.start_proto_training = 5
     C.ema_decay = 0.99
 
     """Cutmix Config"""

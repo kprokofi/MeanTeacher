@@ -27,6 +27,7 @@ from utils.pyt_utils import parse_devices
 from utils.ael_utils import dynamic_copy_paste, sample_from_bank, generate_cutmix_mask, update_cutmix_bank, cal_category_confidence, get_criterion
 from engine.engine import Engine
 from utils.proto_loss import PixelPrototypeCELoss
+from utils.proto_utils import init_prototypes
 # from seg_opr.sync_bn import DataParallelModel, Reduce, BatchNorm2d
 import mask_gen
 from custom_collate import SegCollate
@@ -296,6 +297,9 @@ with Engine(custom_parser=parser) as engine:
 
         ''' supervised part '''
         start_time = time.time()
+        if epoch == config.start_proto_training:
+            init_prototypes(model, dataloader_0, config)
+            model.module.branch1.forward_proto = True
 
         for idx in pbar:
             global_index += 1
@@ -481,7 +485,11 @@ with Engine(custom_parser=parser) as engine:
                     ### unsup CE loss ###
                     loss_consistency1 = weight_unsup * criterion_csst(s_unsup_pred, t_unsup_labels_mixed) / engine.world_size
                     ### proto unsup loss ###
-                    loss_consistency2 = weight_unsup * proto_loss(out_unsup_s, t_unsup_labels_mixed) * config.proto_weight / engine.world_size
+                    if config.protoseg.use_prototypes and epoch >= config.start_proto_training:
+                        loss_consistency2 = weight_unsup * proto_loss(out_unsup_s, t_unsup_labels_mixed) * config.proto_weight / engine.world_size
+                    else:
+                        loss_consistency2 = 0. * out_unsup_s['seg_out'].sum()
+
                     csst_loss = (loss_consistency1 + loss_consistency2) * config.unsup_weight
                     # csst_loss = weight_unsup * criterion_csst(s_unsup_pred, t_unsup_labels_mixed)
 
@@ -592,12 +600,12 @@ with Engine(custom_parser=parser) as engine:
             loss_sup = loss_sup / engine.world_size
 
             ### Proto supervised loss ###
-            if config.protoseg.use_prototypes:
+            if config.protoseg.use_prototypes and epoch >= config.start_proto_training:
                 loss_proto_sup = proto_loss(student_sup_out, gts) * config.proto_weight
                 dist.all_reduce(loss_proto_sup, dist.ReduceOp.SUM)
                 loss_proto_sup = loss_proto_sup / engine.world_size
             else:
-                 loss_proto_sup =  0
+                 loss_proto_sup =  0. * student_sup_out['seg_out'].sum()
 
             ### Supervised loss For Teacher. No Backward. Just for the record ###
             with torch.no_grad():
@@ -619,7 +627,7 @@ with Engine(custom_parser=parser) as engine:
 
             sum_loss_sup += loss_sup.item()
             sum_loss_sup_t += loss_sup_t.item()
-            if config.protoseg.use_prototypes:
+            if config.protoseg.use_prototypes and epoch >= config.start_proto_training:
                 sum_loss_proto_sup += loss_proto_sup.item()
 
             if epoch >= config.start_unsupervised_training:
